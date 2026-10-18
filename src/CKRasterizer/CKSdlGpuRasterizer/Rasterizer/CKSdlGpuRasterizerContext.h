@@ -388,6 +388,7 @@ private:
     CKBOOL EnsureDrawPass();
     CKRECT CurrentTargetRect() const;
     CKRECT WindowRect() const;
+    CKRECT NativeTargetRect() const;
     // Engine coordinates: the logical target is the window or the
     // target texture; the physical pass rect may be scaled by RenderScale.
     CKRECT LogicalTargetRect() const;

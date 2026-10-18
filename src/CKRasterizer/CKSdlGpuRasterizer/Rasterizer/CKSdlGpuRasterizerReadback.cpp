@@ -96,7 +96,7 @@ CKBOOL CKSdlGpuRasterizerContext::ResolveCopySource()
     if (m_FrameState.SceneUsesNative)
         return m_FrameState.InternalTargets;
     return m_FrameState.InternalTargets &&
-           OpenPass(OverlayFrameBuffer(), WindowRect(), 0, 0, 1, 0, "snapshot-resolve") &&
+           OpenPass(OverlayFrameBuffer(), NativeTargetRect(), 0, 0, 1, 0, "snapshot-resolve") &&
            m_Present.SubmitResolve(m_Options.FXAA, m_Options.Sharpness) == CK_OK;
 }
 

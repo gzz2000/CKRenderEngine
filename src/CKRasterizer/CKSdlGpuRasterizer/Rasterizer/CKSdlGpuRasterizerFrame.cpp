@@ -15,6 +15,14 @@ CKRECT CKSdlGpuRasterizerContext::WindowRect() const
     return CKFFMakeRect(m_Width, m_Height);
 }
 
+CKRECT CKSdlGpuRasterizerContext::NativeTargetRect() const
+{
+    const CKSdlGpuPresentTarget &native = m_Present.NativeTarget();
+    return native.IsActive()
+        ? CKFFMakeRect((int)native.Width, (int)native.Height)
+        : WindowRect();
+}
+
 CKRECT CKSdlGpuRasterizerContext::CurrentTargetRect() const
 {
     CKRECT rect;
@@ -84,7 +92,9 @@ CKDWORD CKSdlGpuRasterizerContext::CurrentPassFrameBuffer() const
 
 CKRECT CKSdlGpuRasterizerContext::CurrentPassRect() const
 {
-    return m_FrameState.IsOverlayActive() ? WindowRect() : CurrentTargetRect();
+    if (m_FrameState.IsOverlayActive())
+        return NativeTargetRect();
+    return CurrentTargetRect();
 }
 
 // Decides once per frame whether the scene renders into the scaled scene
@@ -110,8 +120,22 @@ CKBOOL CKSdlGpuRasterizerContext::PrepareFrameTarget()
         return !required && !msaaRequired;
     const CKDWORD width = CKFFScaledDimension(m_Width, m_Options.RenderScale, caps.MaxTextureSize);
     const CKDWORD height = CKFFScaledDimension(m_Height, m_Options.RenderScale, caps.MaxTextureSize);
-    const CKDWORD nativeWidth = CKFFScaledDimension(m_Width, 1.0f, caps.MaxTextureSize);
-    const CKDWORD nativeHeight = CKFFScaledDimension(m_Height, 1.0f, caps.MaxTextureSize);
+
+    // m_Width/m_Height are the logical coordinates exposed to Virtools and
+    // therefore also match SDL mouse coordinates.  A high-density SDL window
+    // has a separately sized Metal drawable.  Keep the final target at that
+    // physical size so resizing or changing resolution cannot leave an old
+    // logical-sized image in the swapchain's top-left corner.
+    int drawableWidth = (int)m_Width;
+    int drawableHeight = (int)m_Height;
+    if (Window)
+        SDL_GetWindowSizeInPixels(Window, &drawableWidth, &drawableHeight);
+    if (drawableWidth <= 0 || drawableHeight <= 0) {
+        drawableWidth = (int)m_Width;
+        drawableHeight = (int)m_Height;
+    }
+    const CKDWORD nativeWidth = CKFFScaledDimension((CKDWORD)drawableWidth, 1.0f, caps.MaxTextureSize);
+    const CKDWORD nativeHeight = CKFFScaledDimension((CKDWORD)drawableHeight, 1.0f, caps.MaxTextureSize);
     const bool sceneUsesNative = m_Options.MSAASamples == 0 && !m_Options.FXAA &&
                                  m_Options.Sharpness == 0.0f &&
                                  width == nativeWidth && height == nativeHeight;
@@ -189,7 +213,7 @@ CKBOOL CKSdlGpuRasterizerContext::CompositeScene()
         m_FrameState.Composited = TRUE;
         return TRUE;
     }
-    if (!OpenPass(OverlayFrameBuffer(), WindowRect(), 0, 0, 1.0f, 0, "composite"))
+    if (!OpenPass(OverlayFrameBuffer(), NativeTargetRect(), 0, 0, 1.0f, 0, "composite"))
         return FALSE;
     if (m_Present.SubmitResolve(m_Options.FXAA, m_Options.Sharpness) != CK_OK)
         return FALSE;
@@ -213,7 +237,7 @@ CKBOOL CKSdlGpuRasterizerContext::PresentInternalTarget(CKPresentSync sync)
     }
     if (direct != CKERR_NOTIMPLEMENTED)
         return FALSE;
-    if (!OpenPass(0, WindowRect(), 0, 0, 1.0f, 0, "present"))
+    if (!OpenPass(0, NativeTargetRect(), 0, 0, 1.0f, 0, "present"))
         return FALSE;
     return m_Present.SubmitBlit() == CK_OK ? TRUE : FALSE;
 }
@@ -342,7 +366,7 @@ CKBOOL CKSdlGpuRasterizerContext::BeginOverlayPhase()
     // open. Keep recording into it; draw state is carried by each packet, so a
     // render-pass split would only force another upload/encode batch.
     const CKDWORD target = OverlayFrameBuffer();
-    const CKRECT rect = WindowRect();
+    const CKRECT rect = NativeTargetRect();
     if (!CanContinuePass(target, rect) && !OpenPass(target, rect, 0, 0, 1.0f, 0, "overlay"))
         return FALSE;
     m_FrameState.Phase = CKFF_FRAME_OVERLAY;
