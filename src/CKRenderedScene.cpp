@@ -220,8 +220,10 @@ CKERROR CKRenderedScene::Draw(CK_RENDER_FLAGS Flags) {
         }
 
         // Build view frustum
-        const float aspectRatio = (float)rc->m_ViewportData.ViewWidth /
-                                  (float)rc->m_ViewportData.ViewHeight;
+        // VxFrustum takes vertical/horizontal extent (H/W), unlike
+        // Perspective(), which takes W/H. Reversing it clips portrait edges.
+        const float aspectRatio = (float)rc->m_ViewportData.ViewHeight /
+                                  (float)rc->m_ViewportData.ViewWidth;
         VxVector *origin = (VxVector *) &rootEntity->m_WorldMatrix[3];
         VxVector *vright = (VxVector *) &rootEntity->m_WorldMatrix[0];
         VxVector *up = (VxVector *) &rootEntity->m_WorldMatrix[1];
