@@ -7,11 +7,14 @@ const op = ['add','add','subtract','reverse-subtract','min','max'];
 const address = ['repeat','repeat','mirror-repeat','clamp-to-edge','clamp-to-edge'];
 const topology = ['triangle-list','point-list','line-list','line-strip','triangle-list','triangle-strip','triangle-list'];
 
-export async function createBallanceGpu(canvas, shaderSources) {
+export async function createBallanceGpu(canvas, shaderSources, acquiredDevice=null) {
     if (!navigator.gpu) throw new Error('WebGPU is unavailable');
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) throw new Error('WebGPU adapter is unavailable');
-    const device = await adapter.requestDevice();
+    let device=acquiredDevice;
+    if(!device){
+        const adapter=await navigator.gpu.requestAdapter();
+        if(!adapter)throw new Error('WebGPU adapter is unavailable');
+        device=await adapter.requestDevice();
+    }
     const context = canvas.getContext('webgpu');
     const format = navigator.gpu.getPreferredCanvasFormat();
     context.configure({device, format, alphaMode:'opaque'});
@@ -36,7 +39,7 @@ export async function createBallanceGpu(canvas, shaderSources) {
 
 class BallanceGpu {
     constructor(device,context,format,canvas,modules,errors) {
-        Object.assign(this,{device,context,format,canvas,modules,errors});
+        Object.assign(this,{device,context,format,canvas,modules,errors,backend:'webgpu'});
         this.textures=new Map();this.samplers=new Map();this.pipelines=new Map();
         this.samples=1;this.uploadBlocks=[];this.uploadIndex=0;this.retiredTextures=[];this.frames=0;this.draws=0;this.defaultTextures=[];
         for (let kind=0;kind<3;++kind) {
