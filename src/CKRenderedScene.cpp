@@ -808,6 +808,16 @@ void CKRenderedScene::UpdateViewportSize(int forceUpdate, CK_RENDER_FLAGS Flags)
     if (bottom <= 0)
         bottom = 1;
 
+    if (rc->m_ResponsiveViewport && !rc->m_TargetTexture) {
+        // Browser presentation follows the drawable; authored 4:3 cameras must
+        // not letterbox only the 3D scene while the 2D roots fill the window.
+        const bool changed = rc->m_ViewportData.ViewX != 0 || rc->m_ViewportData.ViewY != 0 ||
+            rc->m_ViewportData.ViewWidth != right || rc->m_ViewportData.ViewHeight != bottom;
+        rc->SetFullViewport(&rc->m_ViewportData, right, bottom);
+        rc->UpdateProjection(forceUpdate || changed);
+        return;
+    }
+
     int viewX = 0;
     int viewY = 0;
     int viewWidth = right;

@@ -367,6 +367,7 @@ public:
     // Current window or fullscreen device. m_Settings may temporarily describe
     // a texture render target instead.
     CKRenderContextSettings m_WindowSettings;
+    CKBOOL m_ResponsiveViewport = FALSE;
 };
 
 // Saves the fixed-function state the engine changes around a special draw

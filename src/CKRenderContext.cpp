@@ -1,6 +1,7 @@
 #include "CKRenderCallbackSnapshotInternal.h"
 #include "CKRenderProfile.h"
 #include "RCKRenderContext.h"
+#include "CKResponsiveViewport.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -3192,6 +3193,14 @@ void RCKRenderContext::SetClipRect(VxRect *rect) {
     if (m_RasterizerContext) m_RasterizerContext->SetTransformMatrix(VXMATRIX_PROJECTION, clipProj);
 }
 
+extern "C" void CKSetResponsiveViewport(CKRenderContext *context, CKBOOL enabled) {
+    if (!context) return;
+    auto *rc = static_cast<RCKRenderContext *>(context);
+    rc->m_ResponsiveViewport = enabled;
+    rc->m_ProjectionUpdated = FALSE;
+    rc->m_RenderedScene->UpdateViewportSize(TRUE, CK_RENDER_USECURRENTSETTINGS);
+}
+
 void RCKRenderContext::UpdateProjection(CKBOOL forceUpdate) {
     if (!forceUpdate && m_ProjectionUpdated)
         return;
@@ -3203,6 +3212,20 @@ void RCKRenderContext::UpdateProjection(CKBOOL forceUpdate) {
         return;
 
     const float aspect = (float) ((double) m_ViewportData.ViewWidth / (double) m_ViewportData.ViewHeight);
+
+    if (m_ResponsiveViewport && !m_TargetTexture && m_Perspective) {
+        if (CKCamera *camera = GetAttachedCamera()) {
+            int cameraWidth = 4, cameraHeight = 3;
+            camera->GetAspectRatio(cameraWidth, cameraHeight);
+            const float cameraAspect = cameraWidth > 0 && cameraHeight > 0
+                ? float(cameraWidth) / float(cameraHeight) : 4.0f / 3.0f;
+            // Virtools stores horizontal FOV. Preserve the authored vertical
+            // FOV, revealing more horizontally in a wide browser. Always derive
+            // from the camera, never from the previous adapted value. m_Fov is
+            // also consumed by frustum culling and the standard picking ray.
+            m_Fov = 2.0f * atanf(tanf(camera->GetFov() * 0.5f) * aspect / cameraAspect);
+        }
+    }
 
     if (m_Perspective)
         m_ProjectionMatrix.Perspective(m_Fov, aspect, m_NearPlane, m_FarPlane);
