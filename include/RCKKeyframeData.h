@@ -48,6 +48,7 @@ protected:
 
 private:
     friend class RCKObjectAnimation;
+    friend struct CKAnimationSnapshotAccess;
     int ReadKeysFromBuffer(void *Buffer, int BufferSize);
 };
 
@@ -74,6 +75,7 @@ protected:
 
 private:
     friend class RCKObjectAnimation;
+    friend struct CKAnimationSnapshotAccess;
     int ReadKeysFromBuffer(void *Buffer, int BufferSize);
 };
 
@@ -100,6 +102,7 @@ protected:
 
 private:
     friend class RCKObjectAnimation;
+    friend struct CKAnimationSnapshotAccess;
     int ReadKeysFromBuffer(void *Buffer, int BufferSize);
 };
 
@@ -126,6 +129,7 @@ protected:
 
 private:
     friend class RCKObjectAnimation;
+    friend struct CKAnimationSnapshotAccess;
     int ReadKeysFromBuffer(void *Buffer, int BufferSize);
 };
 
@@ -157,6 +161,7 @@ protected:
 
 private:
     friend class RCKObjectAnimation;
+    friend struct CKAnimationSnapshotAccess;
     int ReadKeysFromBuffer(void *Buffer, int BufferSize);
 };
 
@@ -188,6 +193,7 @@ protected:
 
 private:
     friend class RCKObjectAnimation;
+    friend struct CKAnimationSnapshotAccess;
     int ReadKeysFromBuffer(void *Buffer, int BufferSize);
 };
 
@@ -217,6 +223,7 @@ protected:
 
 private:
     friend class RCKObjectAnimation;
+    friend struct CKAnimationSnapshotAccess;
     int ReadKeysFromBuffer(void *Buffer, int BufferSize);
 };
 
@@ -246,6 +253,7 @@ protected:
 
 private:
     friend class RCKObjectAnimation;
+    friend struct CKAnimationSnapshotAccess;
     int ReadKeysFromBuffer(void *Buffer, int BufferSize);
 };
 
@@ -280,6 +288,7 @@ protected:
 
 private:
     friend class RCKObjectAnimation;
+    friend struct CKAnimationSnapshotAccess;
     int ReadKeysFromBuffer(void *Buffer, int BufferSize);
 };
 
@@ -312,6 +321,7 @@ protected:
 
 private:
     friend class RCKObjectAnimation;
+    friend struct CKAnimationSnapshotAccess;
     int ReadKeysFromBuffer(void *Buffer, int BufferSize);
 };
 
@@ -346,6 +356,7 @@ protected:
 
 private:
     friend class RCKObjectAnimation;
+    friend struct CKAnimationSnapshotAccess;
     int ReadKeysFromBuffer(void *Buffer, int BufferSize);
 };
 

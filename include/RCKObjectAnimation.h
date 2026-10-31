@@ -8,6 +8,7 @@
 class RCKKeyedAnimation;
 
 class RCKObjectAnimation : public CKObjectAnimation {
+    friend struct CKAnimationSnapshotAccess;
     friend class RCKKeyedAnimation;  // Allow access to m_ParentKeyedAnimation
 public:
     explicit RCKObjectAnimation(CKContext *Context, CKSTRING name = nullptr);

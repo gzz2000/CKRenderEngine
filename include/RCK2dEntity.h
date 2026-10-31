@@ -12,9 +12,13 @@
 #include "CKStateChunk.h"
 #include "CKMaterial.h"
 #include "CKFile.h"
+#include "CKEntity2dState.h"
 
 class RCK2dEntity : public RCKRenderObject {
     friend class CKRenderedScene;
+    friend int CKCaptureEntity2dState(CKObject *, CKEntity2dState *, std::size_t);
+    friend int CKRestoreEntity2dStates(CKContext *, const CKEntity2dRestoreEntry *,
+                                      std::size_t, std::size_t);
 public:
 
 #undef CK_PURE

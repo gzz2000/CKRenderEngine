@@ -1,3 +1,4 @@
+#include "CKRenderCallbackSnapshotInternal.h"
 #include "RCKRenderManager.h"
 
 #include "CKRasterizerRegistration.h"
@@ -346,6 +347,7 @@ RCKRenderManager::RCKRenderManager(CKContext *context) : CKRenderManager(context
 }
 
 RCKRenderManager::~RCKRenderManager() {
+    CKInvalidateRenderCallbackContext(m_Context);
     DeleteAllVertexBuffers();
 
     while (m_MeshBufferEntries.Size() > 0) {

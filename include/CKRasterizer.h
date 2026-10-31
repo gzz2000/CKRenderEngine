@@ -216,6 +216,8 @@ public:
     virtual CKBOOL CopyToTexture(CKDWORD Texture, const VxRect *Src, const VxRect *Dst, CKRST_CUBEFACE Face) = 0;
     // Synchronous, outside a scene; returns the number of bytes written and
     // 0 on failure. The image is at native (window) resolution.
+    // Backbuffer readback dimensions and Rect use physical drawable pixels;
+    // texture-target readback uses texture pixels, independently of logical viewport size.
     // Two-call protocol: when Image.Image is NULL the descriptor is filled
     // (size, 32-bit ARGB format) and the required byte count is returned
     // without copying anything.

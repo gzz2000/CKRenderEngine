@@ -22,6 +22,8 @@ configure_file(Version.h.in "${CKRE_VERSION_HEADER}" @ONLY)
 
 set(CKRE_PUBLIC_HEADERS
         ${CKRE_VERSION_HEADER}
+        ${CKRE_INCLUDE_DIR}/CKAnimationSnapshot.h
+        ${CKRE_INCLUDE_DIR}/CKRenderCallbackSnapshot.h
         ${CKRE_INCLUDE_DIR}/CKRenderEngineTypes.h
         ${CKRE_INCLUDE_DIR}/CKRenderEngineEnums.h
 
@@ -88,6 +90,8 @@ set(CKRE_CONFIG_FILES
 
 set(CKRE_SOURCES
         CK2_3D.cpp
+        CKEntityUserBoxState.cpp
+        CKEntityVisibilityState.cpp
 
         CKRenderManager.cpp
         CKRenderContext.cpp
@@ -105,6 +109,8 @@ set(CKRE_SOURCES
         CKKeyframeData.cpp
         CKKinematicChain.cpp
         CKLayer.cpp
+        CKAnimationSnapshot.cpp
+        CKRenderCallbackSnapshot.cpp
         CKRenderObject.cpp
         CK2dEntity.cpp
         CK3dEntity.cpp

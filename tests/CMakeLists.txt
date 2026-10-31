@@ -440,3 +440,21 @@ if (TARGET gtest_main)
     ckre_add_engine_test(CKFileAnimationBindingTest CKFileAnimationBindingTest.cpp)
     target_link_libraries(CKFileAnimationBindingTest PRIVATE gtest_main)
 endif ()
+
+ckre_add_engine_test(inverse_arithmetic_tests
+    test_inverse_arithmetic.cpp
+)
+
+ckre_add_engine_test(render_callback_snapshot_tests
+    test_render_callback_snapshot.cpp
+)
+
+ckre_add_engine_test(sprite_position_tests
+    test_sprite_position.cpp
+)
+
+ckre_add_engine_test(Entity2dSnapshotRegression Entity2dSnapshotRegression.cpp)
+
+ckre_add_engine_test(EntityUserBoxSnapshotRegression EntityUserBoxSnapshotRegression.cpp)
+ckre_add_engine_test(EntityVisibilitySnapshotRegression EntityVisibilitySnapshotRegression.cpp)
+ckre_add_engine_test(TransparentOrderSnapshotRegression TransparentOrderSnapshotRegression.cpp)

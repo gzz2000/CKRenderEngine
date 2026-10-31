@@ -1,3 +1,4 @@
+#include "CKRenderCallbackSnapshotInternal.h"
 #include "RCKMesh.h"
 
 #include "CKMemoryPool.h"
@@ -372,6 +373,7 @@ RCKMesh::RCKMesh(CKContext *Context, CKSTRING name) : CKMesh(Context, name) {
 
 // Destructor
 RCKMesh::~RCKMesh() {
+    CKInvalidateRenderCallbackOwner(this);
     // Match IDA at 0x1001bc99
 
     // Clean up material channels (sub_1001BE0B in IDA)

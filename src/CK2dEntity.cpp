@@ -1,4 +1,9 @@
 #include <CKTexture.h>
+#include <memory>
+#include <new>
+#include <unordered_map>
+#include <vector>
+#include "RCKRenderManager.h"
 
 #include "RCK2dEntity.h"
 #include "RCKRenderContext.h"
@@ -598,20 +603,26 @@ CKMaterial *RCK2dEntity::GetMaterial() {
     return m_Material;
 }
 
+// Original CK2_3D.dll 0x1005dba1: switching coordinate systems preserves
+// the rectangle, including when it has not yet been explicitly positioned.
 void RCK2dEntity::SetHomogeneousCoordinates(CKBOOL Coord) {
+    VxRect relative;
+    GetHomogeneousRelativeRect(relative);
     if (Coord) {
         if (!(m_Flags & CK_2DENTITY_USEHOMOGENEOUSCOORD)) {
-            m_Flags |= CK_2DENTITY_USEHOMOGENEOUSCOORD;
+            m_Flags |= CK_2DENTITY_USEHOMOGENEOUSCOORD | CK_2DENTITY_UPDATEHOMOGENEOUSCOORD;
             if (!m_HomogeneousRect)
                 m_HomogeneousRect = new VxRect();
+            *m_HomogeneousRect = m_Rect;
+            m_HomogeneousRect->TransformToHomogeneous(relative);
         }
     } else {
-        if (m_Flags & CK_2DENTITY_USEHOMOGENEOUSCOORD) {
-            m_Flags &= ~CK_2DENTITY_USEHOMOGENEOUSCOORD;
-            if (m_HomogeneousRect) {
-                delete m_HomogeneousRect;
-                m_HomogeneousRect = nullptr;
-            }
+        m_Flags &= ~CK_2DENTITY_USEHOMOGENEOUSCOORD;
+        if (m_HomogeneousRect) {
+            m_Rect = *m_HomogeneousRect;
+            m_Rect.TransformFromHomogeneous(relative);
+            delete m_HomogeneousRect;
+            m_HomogeneousRect = nullptr;
         }
     }
 }
@@ -1518,4 +1529,173 @@ void RCK2dEntity::Register() {
 
 RCK2dEntity *RCK2dEntity::CreateInstance(CKContext *Context) {
     return new RCK2dEntity(Context);
+}
+
+// Exact practice rewind. Public setters sort equal-Z siblings and convert
+// coordinates, so replaying them is not an inverse of capturing a 2D tree.
+#if defined(_WIN32)
+#define CK_2D_STATE_EXPORT __declspec(dllexport)
+#else
+#define CK_2D_STATE_EXPORT __attribute__((visibility("default")))
+#endif
+
+extern "C" CK_2D_STATE_EXPORT int CKCaptureEntity2dState(
+    CKObject *object, CKEntity2dState *state, std::size_t bytes) {
+    if (!object || !state || bytes != sizeof(*state) ||
+        !CKIsChildClassOf(object->GetClassID(), CKCID_2DENTITY)) return 0;
+    auto *entity = static_cast<RCK2dEntity *>(object);
+    *state = CKEntity2dState{};
+    state->object = entity->GetID();
+    state->parent = entity->m_Parent ? entity->m_Parent->GetID() : 0;
+    state->material = entity->m_Material ? entity->m_Material->GetID() : 0;
+    state->flags = entity->m_Flags;
+    state->zOrder = entity->m_ZOrder;
+    state->hasHomogeneous = entity->m_HomogeneousRect != nullptr;
+    state->rect = entity->m_Rect;
+    if (state->hasHomogeneous) state->homogeneous = *entity->m_HomogeneousRect;
+    state->source = entity->m_SourceRect;
+    state->vertices = entity->m_VtxPos;
+    state->sourceCache = entity->m_SrcRect;
+    return 1;
+}
+
+extern "C" CK_2D_STATE_EXPORT int CKRestoreEntity2dStates(
+    CKContext *context, const CKEntity2dRestoreEntry *entries,
+    std::size_t count, std::size_t entryBytes) {
+    if (!context || (!entries && count) ||
+        entryBytes != sizeof(CKEntity2dRestoreEntry)) return 0;
+    try {
+        struct Pending {
+            RCK2dEntity *entity = nullptr;
+            CKMaterial *material = nullptr;
+            std::unique_ptr<VxRect> homogeneous;
+            XArray<CK2dEntity *> children;
+        };
+        std::vector<Pending> pending(count);
+        std::unordered_map<CK_ID, std::size_t> index;
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto &entry = entries[i];
+            const auto *state = entry.state;
+            if (!state || state->version != 1 || !state->object ||
+                state->hasHomogeneous > 1 ||
+                ((state->flags & CK_2DENTITY_USEHOMOGENEOUSCOORD) && !state->hasHomogeneous) ||
+                (entry.childCount && !entry.children) || entry.childCount > count ||
+                !index.emplace(state->object, i).second) return 0;
+            auto *object = context->GetObject(state->object);
+            if (!object || object->IsToBeDeleted() ||
+                !CKIsChildClassOf(object->GetClassID(), CKCID_2DENTITY)) return 0;
+            pending[i].entity = static_cast<RCK2dEntity *>(object);
+            if (state->material) {
+                pending[i].material = CKMaterial::Cast(context->GetObject(state->material));
+                if (!pending[i].material || pending[i].material->IsToBeDeleted()) return 0;
+            }
+            if (state->hasHomogeneous)
+                pending[i].homogeneous.reset(new VxRect(state->homogeneous));
+        }
+        auto *render = static_cast<RCKRenderManager *>(context->GetRenderManager());
+        auto *back = render ? reinterpret_cast<RCK2dEntity *>(render->m_2DRootBack) : nullptr;
+        auto *fore = render ? reinterpret_cast<RCK2dEntity *>(render->m_2DRootFore) : nullptr;
+        std::vector<std::size_t> owner(count, count);
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto &entry = entries[i];
+            auto *entity = pending[i].entity;
+            // Never orphan current entities outside the captured graph.
+            if (entity->m_Parent && !index.count(entity->m_Parent->GetID())) return 0;
+            for (auto *child : entity->m_Children)
+                if (!child || !index.count(child->GetID())) return 0;
+            if (entry.state->parent && !index.count(entry.state->parent)) return 0;
+            for (std::size_t j = 0; j < entry.childCount; ++j) {
+                auto found = index.find(entry.children[j]);
+                if (found == index.end() || found->second == i || owner[found->second] != count) return 0;
+                const auto childIndex = found->second;
+                const auto parent = entries[childIndex].state->parent;
+                const bool root = entity == back || entity == fore;
+                if (parent != (root ? 0 : entry.state->object)) return 0;
+                owner[childIndex] = i;
+                pending[i].children.PushBack(reinterpret_cast<CK2dEntity *>(pending[childIndex].entity));
+            }
+        }
+        for (std::size_t i = 0; i < count; ++i) {
+            if (entries[i].state->parent && owner[i] == count) return 0;
+            // Check the actual child graph, including render-root edges.
+            std::size_t ancestor = i;
+            for (std::size_t depth = 0; ancestor != count; ++depth) {
+                if (depth >= count) return 0;
+                ancestor = owner[ancestor];
+            }
+        }
+        // A resize is presentation state, not saved game time. Remember the
+        // live root rectangles before committing any saved layout.
+        VxRect liveBack, liveFore;
+        if (back) back->GetRect(liveBack);
+        if (fore) fore->GetRect(liveFore);
+        for (std::size_t i = 0; i < count; ++i) {
+            auto *entity = pending[i].entity;
+            const auto &state = *entries[i].state;
+            entity->m_Parent = state.parent
+                ? reinterpret_cast<CK2dEntity *>(pending[index.at(state.parent)].entity) : nullptr;
+            entity->m_Children.Swap(pending[i].children);
+            delete entity->m_HomogeneousRect;
+            entity->m_HomogeneousRect = pending[i].homogeneous.release();
+            entity->m_Rect = state.rect;
+            entity->m_SourceRect = state.source;
+            entity->m_VtxPos = state.vertices;
+            entity->m_SrcRect = state.sourceCache;
+            entity->m_Flags = state.flags;
+            entity->m_ZOrder = state.zOrder;
+            entity->m_Material = pending[i].material;
+        }
+        // Reflow only when the viewport really changed. At an unchanged size,
+        // no float arithmetic or ordering operation touches the captured data.
+        const auto reflow = [&](auto &&self, std::size_t i, const VxRect &rect) -> void {
+            auto *entity = pending[i].entity;
+            const VxRect old = entity->m_Rect;
+            entity->m_Rect = rect;
+            for (auto *childObject : entity->m_Children) {
+                auto *child = reinterpret_cast<RCK2dEntity *>(childObject);
+                VxRect next = child->m_Rect;
+                if (child->m_Flags & CK_2DENTITY_USEHOMOGENEOUSCOORD) {
+                    next = *child->m_HomogeneousRect;
+                    VxRect relative;
+                    child->GetHomogeneousRelativeRect(relative);
+                    next.TransformFromHomogeneous(relative);
+                } else {
+                    const auto axis = [](float lo, float hi, float oldLo, float oldHi,
+                                         float newLo, float newHi, bool stickLo, bool stickHi,
+                                         float &resultLo, float &resultHi) {
+                        const float size = hi - lo;
+                        if (stickLo) {
+                            resultLo = lo - oldLo + newLo;
+                            resultHi = stickHi ? newHi - (oldHi - hi) : resultLo + size;
+                        } else if (stickHi) {
+                            resultHi = newHi - (oldHi - hi);
+                            resultLo = resultHi - size;
+                        } else {
+                            const float ratio = oldHi != oldLo ? ((lo + hi) * 0.5f - oldLo) / (oldHi - oldLo) : 0.5f;
+                            const float center = (newHi - newLo) * ratio + newLo;
+                            resultLo = center - size * 0.5f;
+                            resultHi = center + size * 0.5f;
+                        }
+                    };
+                    axis(next.left, next.right, old.left, old.right, rect.left, rect.right,
+                         child->m_Flags & CK_2DENTITY_STICKLEFT, child->m_Flags & CK_2DENTITY_STICKRIGHT,
+                         next.left, next.right);
+                    axis(next.top, next.bottom, old.top, old.bottom, rect.top, rect.bottom,
+                         child->m_Flags & CK_2DENTITY_STICKTOP, child->m_Flags & CK_2DENTITY_STICKBOTTOM,
+                         next.top, next.bottom);
+                }
+                self(self, index.at(child->GetID()), next);
+            }
+        };
+        const auto resizeRoot = [&](RCK2dEntity *entity, const VxRect &live) {
+            if (!entity) return;
+            auto it = index.find(entity->GetID());
+            if (it != index.end() && entity->m_Rect != live) reflow(reflow, it->second, live);
+        };
+        resizeRoot(reinterpret_cast<RCK2dEntity *>(back), liveBack);
+        resizeRoot(reinterpret_cast<RCK2dEntity *>(fore), liveFore);
+        return 1;
+    } catch (const std::bad_alloc &) {
+        return 0;
+    }
 }

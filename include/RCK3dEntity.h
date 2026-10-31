@@ -117,6 +117,8 @@ public:
     VxRect m_RenderExtents;
     // Offset 0x1A4: Scene graph node for render ordering
     CKSceneGraphNode *m_SceneGraphNode;
+    // Derived cache metadata, never serialized or included in physics state.
+    std::uint64_t m_InverseArithmeticGeneration = 0;
 };
 
 #endif // RCK3DENTITY_H

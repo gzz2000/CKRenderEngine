@@ -1,6 +1,11 @@
 #include "RCK3dEntity.h"
+#include "CKEntityTransformState.h"
+#include <memory>
+#include <new>
 
 #include "VxMath.h"
+#include "LegacyMatrixMath.h"
+#include "VxLegacyMatrix.h"
 #include "CKSkin.h"
 #include "CKMesh.h"
 #include "CKSceneGraph.h"
@@ -15,6 +20,82 @@
 #include "RCKMesh.h"
 #include "RCKObjectAnimation.h"
 #include "RCKSkin.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+
+// The precise solver selects the original nonaliased entity arithmetic through
+// VxMath. Alias paths retain their existing implementation. Keep the explicit
+// diagnostic override for comparisons against pre-provider experiments.
+static void MultiplyEntityMatrix(VxMatrix &result, const VxMatrix &a,
+                                 const VxMatrix &b) {
+    static const bool retailSSE = [] {
+        const char *value = std::getenv("BALLANCE_DIAG_RETAIL_ENTITY_MATRIX_SSE");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    if (retailSSE && &result != &a && &result != &b) {
+        LegacyNonAliasedSSEMatrixMultiply(&result[0][0], &a[0][0], &b[0][0]);
+        return;
+    }
+    if (VxTryLegacyEntityMatrixMultiply(&result[0][0], &a[0][0], &b[0][0]))
+        return;
+    Vx3DMultiplyMatrix(result, a, b);
+}
+
+// Diagnostic only: read matrices already available at the operation boundary.
+// Never call inverse/cache-update APIs just to produce an observation.
+static void TraceEntityMatrix(const char *event, RCK3dEntity *entity,
+                              const VxMatrix &matrix) {
+    const char *selected = std::getenv("BALLANCE_TRACE_ENTITY_MATRIX");
+    if (!selected || !entity || !entity->GetName() ||
+        std::strcmp(selected, entity->GetName()) != 0) return;
+    std::fprintf(stderr, "ENTITY_MATRIX event=%s id=%u name=%s values=",
+                 event, static_cast<unsigned>(entity->GetID()), entity->GetName());
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 4; ++column)
+            std::fprintf(stderr, "%s%a", (row || column) ? "," : "",
+                         static_cast<double>(matrix[row][column]));
+    std::fputc('\n', stderr);
+}
+
+// Default-off paired original/native rotation boundary observation.
+static void TraceCameraRotationMatrix(const char *event, unsigned index, const VxMatrix &matrix) {
+    std::fprintf(stderr, "CAM_MATRIX event=%s index=%u", event, index);
+    for (int r=0;r<4;++r) for(int c=0;c<4;++c)
+        std::fprintf(stderr," m%d%d=%a",r,c,matrix[r][c]);
+    std::fputc('\n',stderr);
+}
+
+static void TraceOrientationProduct(unsigned index,unsigned step,const VxVector &input,float scalar,const VxVector &output) {
+    std::fprintf(stderr,"CAM_SET_MUL index=%u step=%u input=(%a %a %a) scalar=%a output=(%a %a %a)\n",index,step,input.x,input.y,input.z,scalar,output.x,output.y,output.z);
+}
+
+struct TraceCameraHierarchy {
+    bool selected=false; unsigned index=0;
+    const VxMatrix *world=nullptr, *local=nullptr;
+    RCK3dEntity *parent=nullptr;
+    static void Matrix(const char *event,unsigned index,const VxMatrix &m) {
+        std::fprintf(stderr,"CAM_HM event=%s index=%u",event,index);
+        for(int r=0;r<4;++r)for(int c=0;c<4;++c)std::fprintf(stderr," m%d%d=%a",r,c,m[r][c]);
+        std::fputc('\n',stderr);
+    }
+    TraceCameraHierarchy(const char *event,RCK3dEntity *entity,RCK3dEntity *p,const VxMatrix &w,const VxMatrix &l,int update,int scale):world(&w),local(&l),parent(p) {
+        const char *name=std::getenv("BALLANCE_TRACE_CAMERA_HIERARCHY");
+        selected=name && entity->GetName() && !std::strcmp(name,entity->GetName());
+        if(!selected)return;
+        static unsigned counter=0;index=counter++;
+        std::fprintf(stderr,"CAM_HIERARCHY event=%s index=%u parent=%s update=%d scale=%d\n",event,index,p&&p->GetName()?p->GetName():"<none>",update,scale);
+        Matrix("world.before",index,*world);Matrix("local.before",index,*local);
+        if(parent)Matrix("parent.before",index,parent->GetWorldMatrix());
+    }
+    ~TraceCameraHierarchy(){
+        if(!selected)return;
+        Matrix("world.after",index,*world);Matrix("local.after",index,*local);
+        if(parent)Matrix("parent.after",index,parent->GetWorldMatrix());
+    }
+};
 
 extern int (*g_RayIntersection)(RCKMesh *, VxVector &, VxVector &, VxIntersectionDesc *, CK_RAYINTERSECTION, VxMatrix const &);
 
@@ -302,6 +383,7 @@ CKERROR RCK3dEntity::Load(CKStateChunk *chunk, CKFile *file) {
         }
     }
 
+    TraceEntityMatrix("load.world", this, worldMatrix);
     if (file || !preservedWorldAligned) {
         SetWorldMatrix(worldMatrix, TRUE);
     }
@@ -692,6 +774,12 @@ CKStateChunk *RCK3dEntity::Save(CKFile *file, CKDWORD flags) {
 // =====================================================
 
 RCK3dEntity::RCK3dEntity(CKContext *Context, CKSTRING name) : RCKRenderObject(Context, name) {
+    const bool traceConstruction = std::getenv("BALLANCE_TRACE_OBJECT_CONSTRUCTION") != nullptr;
+    if (traceConstruction) {
+        std::fprintf(stderr, "RCK3dEntity ctor begin this=%p context=%p name=%s sizeof=%zu\n",
+                     this, Context, name ? name : "<null>", sizeof(*this));
+        std::fflush(stderr);
+    }
     m_Place = 0;
     m_Parent = nullptr;
     m_3dEntityFlags = 0;
@@ -700,18 +788,38 @@ RCK3dEntity::RCK3dEntity(CKContext *Context, CKSTRING name) : RCKRenderObject(Co
     m_Skin = nullptr;
     m_LastFrameMatrix = nullptr;
     m_SceneGraphNode = nullptr;
+    if (traceConstruction) {
+        std::fprintf(stderr, "RCK3dEntity ctor fields this=%p\n", this);
+        std::fflush(stderr);
+    }
 
+    if (traceConstruction) { std::fprintf(stderr, "RCK3dEntity ctor local begin this=%p\n", this); std::fflush(stderr); }
     m_LocalMatrix = VxMatrix::Identity();
+    if (traceConstruction) { std::fprintf(stderr, "RCK3dEntity ctor local end this=%p\n", this); std::fflush(stderr); }
     m_WorldMatrix = VxMatrix::Identity();
+    if (traceConstruction) { std::fprintf(stderr, "RCK3dEntity ctor world end this=%p\n", this); std::fflush(stderr); }
     m_InverseWorldMatrix = VxMatrix::Identity();
+
+    if (traceConstruction) {
+        std::fprintf(stderr, "RCK3dEntity ctor matrices this=%p context-member=%p\n", this, m_Context);
+        std::fflush(stderr);
+    }
 
     m_MoveableFlags = VX_MOVEABLE_PICKABLE | VX_MOVEABLE_VISIBLE | VX_MOVEABLE_WORLDALIGNED | VX_MOVEABLE_RENDERCHANNELS;
 
     // Create scene graph node - critical for rendering!
     // Based on IDA analysis at 0x10005086: RCK3dEntity constructor calls RCKRenderManager::CreateNode
     RCKRenderManager *renderManager = (RCKRenderManager *) m_Context->GetRenderManager();
+    if (traceConstruction) {
+        std::fprintf(stderr, "RCK3dEntity ctor manager this=%p manager=%p\n", this, renderManager);
+        std::fflush(stderr);
+    }
     if (renderManager) {
         m_SceneGraphNode = renderManager->CreateNode(this);
+        if (traceConstruction) {
+            std::fprintf(stderr, "RCK3dEntity ctor node this=%p node=%p\n", this, m_SceneGraphNode);
+            std::fflush(stderr);
+        }
     }
 }
 
@@ -846,7 +954,7 @@ CKBOOL RCK3dEntity::SetParent(CK3dEntity *Parent, CKBOOL KeepWorldPos) {
         if (m_Parent) {
             // Recompute local matrix: LocalMatrix = InverseParentWorld * WorldMatrix
             const VxMatrix &invParent = m_Parent->GetInverseWorldMatrix();
-            Vx3DMultiplyMatrix(m_LocalMatrix, invParent, m_WorldMatrix);
+            MultiplyEntityMatrix(m_LocalMatrix, invParent, m_WorldMatrix);
         } else {
             // No parent - local = world
             m_LocalMatrix = m_WorldMatrix;
@@ -1339,6 +1447,17 @@ void RCK3dEntity::Rotate(const VxVector *Axis, float Angle, CK3dEntity *Ref, CKB
     if (fabsf(Angle) < EPSILON)
         return;
 
+    const char *traceName = std::getenv("BALLANCE_TRACE_CAMERA_ROTATE");
+    const bool trace = traceName && GetName() && !std::strcmp(traceName, GetName());
+    static unsigned traceCounter = 0;
+    const unsigned traceIndex = trace ? traceCounter++ : 0;
+    if (trace) {
+        std::fprintf(stderr,"CAM_ROTATE index=%u axis=(%a %a %a) angle=%a ref=%s keep=%d\n",
+                     traceIndex,Axis->x,Axis->y,Axis->z,Angle,Ref && Ref->GetName()?Ref->GetName():"<none>",KeepChildren);
+        TraceCameraRotationMatrix("before",traceIndex,m_WorldMatrix);
+        if (Ref) TraceCameraRotationMatrix("reference",traceIndex,Ref->GetWorldMatrix());
+    }
+
     // IDA takes the position from GetWorldMatrix()
     const VxMatrix &world = GetWorldMatrix();
     VxVector originalPos(world[3][0], world[3][1], world[3][2]);
@@ -1355,10 +1474,14 @@ void RCK3dEntity::Rotate(const VxVector *Axis, float Angle, CK3dEntity *Ref, CKB
     // Build rotation matrix from axis-angle
     VxMatrix rot;
     Vx3DMatrixFromRotation(rot, worldAxis, Angle);
+    if (trace) {
+        std::fprintf(stderr,"CAM_AXIS index=%u axis=(%a %a %a) angle=%a\n",traceIndex,worldAxis.x,worldAxis.y,worldAxis.z,Angle);
+        TraceCameraRotationMatrix("rotation",traceIndex,rot);
+    }
 
-    // IDA: Vx3DMultiplyMatrix(&v11, &v8, &this->m_WorldMatrix);
+    // IDA: MultiplyEntityMatrix(&v11, &v8, &this->m_WorldMatrix);
     VxMatrix newWorld;
-    Vx3DMultiplyMatrix(newWorld, rot, m_WorldMatrix);
+    MultiplyEntityMatrix(newWorld, rot, m_WorldMatrix);
 
     // IDA: Preserve original position in row 3
     newWorld[3][0] = originalPos.x;
@@ -1367,6 +1490,7 @@ void RCK3dEntity::Rotate(const VxVector *Axis, float Angle, CK3dEntity *Ref, CKB
 
     // IDA: this->SetWorldMatrix(this, &v11, KeepChildren);
     SetWorldMatrix(newWorld, KeepChildren);
+    if (trace) TraceCameraRotationMatrix("after",traceIndex,m_WorldMatrix);
 }
 
 void RCK3dEntity::Translate3f(float X, float Y, float Z, CK3dEntity *Ref, CKBOOL KeepChildren) {
@@ -1424,10 +1548,10 @@ void RCK3dEntity::AddScale(const VxVector *Scale, CKBOOL KeepChildren, CKBOOL Lo
 
     VxMatrix newMat;
     if (Local) {
-        Vx3DMultiplyMatrix(newMat, m_LocalMatrix, scaleMat);
+        MultiplyEntityMatrix(newMat, m_LocalMatrix, scaleMat);
         SetLocalMatrix(newMat, KeepChildren);
     } else {
-        Vx3DMultiplyMatrix(newMat, m_WorldMatrix, scaleMat);
+        MultiplyEntityMatrix(newMat, m_WorldMatrix, scaleMat);
         SetWorldMatrix(newMat, KeepChildren);
     }
 }
@@ -1501,6 +1625,16 @@ void RCK3dEntity::GetPosition(VxVector *Pos, CK3dEntity *Ref) const {
 void RCK3dEntity::SetOrientation(const VxVector *Dir, const VxVector *Up, const VxVector *Right, CK3dEntity *Ref, CKBOOL KeepChildren) {
     // IDA @ 0x10006CC3
     constexpr float kEps = 0.000001f;
+    const char *traceName=std::getenv("BALLANCE_TRACE_SET_ORIENTATION");
+    const bool trace=traceName && GetName() && !std::strcmp(traceName,GetName());
+    static unsigned traceCounter=0;const unsigned traceIndex=trace?traceCounter++:0;
+    if(trace){
+        std::fprintf(stderr,"CAM_SET index=%u dir=(%a %a %a) up=(%a %a %a) right=%d ref=%s keep=%d\n",traceIndex,Dir->x,Dir->y,Dir->z,Up->x,Up->y,Up->z,Right?1:0,Ref&&Ref->GetName()?Ref->GetName():"<none>",KeepChildren);
+        if(Right)std::fprintf(stderr,"CAM_SET_RIGHT index=%u input=(%a %a %a)\n",traceIndex,Right->x,Right->y,Right->z);
+        TraceCameraRotationMatrix("set.before",traceIndex,m_WorldMatrix);
+        if(Ref)TraceCameraRotationMatrix("set.reference",traceIndex,Ref->GetWorldMatrix());
+    }
+
 
     VxVector prevScale;
     GetScale(&prevScale, FALSE);
@@ -1557,33 +1691,70 @@ void RCK3dEntity::SetOrientation(const VxVector *Dir, const VxVector *Up, const 
     // IDA does this in two steps: normalizedAxis = axis * (1.0 / Magnitude(axis)) ; scaledAxis = normalizedAxis * savedScale.
     {
         const VxVector axis(m_WorldMatrix[0][0], m_WorldMatrix[0][1], m_WorldMatrix[0][2]);
-        const float invMag = static_cast<float>(1.0 / static_cast<double>(axis.Magnitude()));
-        const VxVector normalized = axis * invMag;
+        VxVector normalized;
+        // Retail BEC0 keeps sqrt extended until reciprocal, then spills float.
+        // This provider is installed only while precise physics/TAS is active.
+        const bool precise=VxTryLegacyNormalizeOrientation(&axis.x,&normalized.x);
+        float invMag=0.0f;
+        if (!precise) {
+            invMag=static_cast<float>(1.0 / static_cast<double>(axis.Magnitude()));
+            normalized=axis*invMag;
+        }
         const VxVector scaled = normalized * prevScale.x;
+        if(trace){
+            if(precise)std::fprintf(stderr,"CAM_SET_PRECISE index=%u step=0 input=(%a %a %a) output=(%a %a %a)\n",traceIndex,axis.x,axis.y,axis.z,normalized.x,normalized.y,normalized.z);
+            else TraceOrientationProduct(traceIndex,0,axis,invMag,normalized);
+            TraceOrientationProduct(traceIndex,1,normalized,prevScale.x,scaled);
+        }
         m_WorldMatrix[0][0] = scaled.x;
         m_WorldMatrix[0][1] = scaled.y;
         m_WorldMatrix[0][2] = scaled.z;
     }
     {
         const VxVector axis(m_WorldMatrix[1][0], m_WorldMatrix[1][1], m_WorldMatrix[1][2]);
-        const float invMag = static_cast<float>(1.0 / static_cast<double>(axis.Magnitude()));
-        const VxVector normalized = axis * invMag;
+        VxVector normalized;
+        // Retail BEC0 keeps sqrt extended until reciprocal, then spills float.
+        // This provider is installed only while precise physics/TAS is active.
+        const bool precise=VxTryLegacyNormalizeOrientation(&axis.x,&normalized.x);
+        float invMag=0.0f;
+        if (!precise) {
+            invMag=static_cast<float>(1.0 / static_cast<double>(axis.Magnitude()));
+            normalized=axis*invMag;
+        }
         const VxVector scaled = normalized * prevScale.y;
+        if(trace){
+            if(precise)std::fprintf(stderr,"CAM_SET_PRECISE index=%u step=2 input=(%a %a %a) output=(%a %a %a)\n",traceIndex,axis.x,axis.y,axis.z,normalized.x,normalized.y,normalized.z);
+            else TraceOrientationProduct(traceIndex,2,axis,invMag,normalized);
+            TraceOrientationProduct(traceIndex,3,normalized,prevScale.y,scaled);
+        }
         m_WorldMatrix[1][0] = scaled.x;
         m_WorldMatrix[1][1] = scaled.y;
         m_WorldMatrix[1][2] = scaled.z;
     }
     {
         const VxVector axis(m_WorldMatrix[2][0], m_WorldMatrix[2][1], m_WorldMatrix[2][2]);
-        const float invMag = static_cast<float>(1.0 / static_cast<double>(axis.Magnitude()));
-        const VxVector normalized = axis * invMag;
+        VxVector normalized;
+        // Retail BEC0 keeps sqrt extended until reciprocal, then spills float.
+        // This provider is installed only while precise physics/TAS is active.
+        const bool precise=VxTryLegacyNormalizeOrientation(&axis.x,&normalized.x);
+        float invMag=0.0f;
+        if (!precise) {
+            invMag=static_cast<float>(1.0 / static_cast<double>(axis.Magnitude()));
+            normalized=axis*invMag;
+        }
         const VxVector scaled = normalized * prevScale.z;
+        if(trace){
+            if(precise)std::fprintf(stderr,"CAM_SET_PRECISE index=%u step=4 input=(%a %a %a) output=(%a %a %a)\n",traceIndex,axis.x,axis.y,axis.z,normalized.x,normalized.y,normalized.z);
+            else TraceOrientationProduct(traceIndex,4,axis,invMag,normalized);
+            TraceOrientationProduct(traceIndex,5,normalized,prevScale.z,scaled);
+        }
         m_WorldMatrix[2][0] = scaled.x;
         m_WorldMatrix[2][1] = scaled.y;
         m_WorldMatrix[2][2] = scaled.z;
     }
 
     WorldMatrixChanged(KeepChildren, TRUE);
+    if(trace)TraceCameraRotationMatrix("set.after",traceIndex,m_WorldMatrix);
 }
 
 void RCK3dEntity::GetOrientation(VxVector *Dir, VxVector *Up, VxVector *Right, CK3dEntity *Ref) {
@@ -1592,7 +1763,7 @@ void RCK3dEntity::GetOrientation(VxVector *Dir, VxVector *Up, VxVector *Right, C
     // - Else: returns normalized axes from GetWorldMatrix()
     if (Ref) {
         VxMatrix tmp;
-        Vx3DMultiplyMatrix(tmp, Ref->GetInverseWorldMatrix(), m_WorldMatrix);
+        MultiplyEntityMatrix(tmp, Ref->GetInverseWorldMatrix(), m_WorldMatrix);
 
         if (Right) {
             Right->x = tmp[0][0];
@@ -2086,6 +2257,9 @@ Implementation based on decompilation at 0x100062d6:
 - Else: propagate LocalMatrixChanged to children (so they move with parent)
 *************************************************/
 void RCK3dEntity::WorldMatrixChanged(int updateChildren, int keepScale) {
+    TraceCameraHierarchy traceHierarchy("world",this,m_Parent,m_WorldMatrix,m_LocalMatrix,updateChildren,keepScale);
+    TraceEntityMatrix("world.world.before", this, m_WorldMatrix);
+    TraceEntityMatrix("world.local.before", this, m_LocalMatrix);
     // Invalidate scene graph node's bounding box
     if (m_SceneGraphNode) {
         m_SceneGraphNode->InvalidateBox(keepScale);
@@ -2112,7 +2286,9 @@ void RCK3dEntity::WorldMatrixChanged(int updateChildren, int keepScale) {
     if (m_Parent) {
         // LocalMatrix = ParentInverseWorld * WorldMatrix
         const VxMatrix &parentInverse = m_Parent->GetInverseWorldMatrix();
-        Vx3DMultiplyMatrix(m_LocalMatrix, parentInverse, m_WorldMatrix);
+        TraceEntityMatrix("world.parentinverse", this, parentInverse);
+        MultiplyEntityMatrix(m_LocalMatrix, parentInverse, m_WorldMatrix);
+        TraceEntityMatrix("world.local.after", this, m_LocalMatrix);
     } else {
         // No parent - local matrix equals world matrix
         m_LocalMatrix = m_WorldMatrix;
@@ -2127,7 +2303,10 @@ void RCK3dEntity::WorldMatrixChanged(int updateChildren, int keepScale) {
             RCK3dEntity *child = (RCK3dEntity *) *it;
             if (child && !(child->m_MoveableFlags & VX_MOVEABLE_DONTUPDATEFROMPARENT)) {
                 // Child's local = OurInverse * Child's World
-                Vx3DMultiplyMatrix(child->m_LocalMatrix, m_InverseWorldMatrix, child->m_WorldMatrix);
+                TraceEntityMatrix("child.parentinverse", child, m_InverseWorldMatrix);
+                TraceEntityMatrix("child.world.input", child, child->m_WorldMatrix);
+                MultiplyEntityMatrix(child->m_LocalMatrix, m_InverseWorldMatrix, child->m_WorldMatrix);
+                TraceEntityMatrix("child.local.after", child, child->m_LocalMatrix);
             }
         }
     } else {
@@ -2153,6 +2332,9 @@ Implementation based on decompilation at 0x100064a4:
 - Propagates changes to children similar to WorldMatrixChanged
 *************************************************/
 void RCK3dEntity::LocalMatrixChanged(int updateChildren, int keepScale) {
+    TraceCameraHierarchy traceHierarchy("local",this,m_Parent,m_WorldMatrix,m_LocalMatrix,updateChildren,keepScale);
+    TraceEntityMatrix("local.world.before", this, m_WorldMatrix);
+    TraceEntityMatrix("local.local.before", this, m_LocalMatrix);
     // Invalidate scene graph node's bounding box
     if (m_SceneGraphNode) {
         m_SceneGraphNode->InvalidateBox(keepScale);
@@ -2175,7 +2357,9 @@ void RCK3dEntity::LocalMatrixChanged(int updateChildren, int keepScale) {
     // Update world matrix based on parent relationship
     if (m_Parent) {
         // WorldMatrix = ParentWorld * LocalMatrix
-        Vx3DMultiplyMatrix(m_WorldMatrix, m_Parent->m_WorldMatrix, m_LocalMatrix);
+        TraceEntityMatrix("local.parentworld", this, m_Parent->m_WorldMatrix);
+        MultiplyEntityMatrix(m_WorldMatrix, m_Parent->m_WorldMatrix, m_LocalMatrix);
+        TraceEntityMatrix("local.world.after", this, m_WorldMatrix);
     } else {
         // No parent - world matrix equals local matrix
         m_WorldMatrix = m_LocalMatrix;
@@ -2189,7 +2373,10 @@ void RCK3dEntity::LocalMatrixChanged(int updateChildren, int keepScale) {
         for (CKObject **it = m_Children.Begin(); it != m_Children.End(); ++it) {
             RCK3dEntity *child = (RCK3dEntity *) *it;
             if (child && !(child->m_MoveableFlags & VX_MOVEABLE_DONTUPDATEFROMPARENT)) {
-                Vx3DMultiplyMatrix(child->m_LocalMatrix, m_InverseWorldMatrix, child->m_WorldMatrix);
+                TraceEntityMatrix("child.parentinverse", child, m_InverseWorldMatrix);
+                TraceEntityMatrix("child.world.input", child, child->m_WorldMatrix);
+                MultiplyEntityMatrix(child->m_LocalMatrix, m_InverseWorldMatrix, child->m_WorldMatrix);
+                TraceEntityMatrix("child.local.after", child, child->m_LocalMatrix);
             }
         }
     } else {
@@ -2216,6 +2403,9 @@ Implementation based on decompilation at 0x1000666b:
 - Propagates changes to children similar to WorldMatrixChanged
 *************************************************/
 void RCK3dEntity::WorldPositionChanged(int updateChildren, int keepScale) {
+    if (m_InverseArithmeticGeneration != VxGetLegacyMatrixGeneration())
+        m_MoveableFlags &= ~VX_MOVEABLE_INVERSEWORLDMATVALID;
+
     // Invalidate scene graph node's bounding box
     if (m_SceneGraphNode) {
         m_SceneGraphNode->InvalidateBox(keepScale);
@@ -2243,7 +2433,7 @@ void RCK3dEntity::WorldPositionChanged(int updateChildren, int keepScale) {
     if (m_Parent) {
         // LocalMatrix = ParentInverseWorld * WorldMatrix
         const VxMatrix &parentInverse = m_Parent->GetInverseWorldMatrix();
-        Vx3DMultiplyMatrix(m_LocalMatrix, parentInverse, m_WorldMatrix);
+        MultiplyEntityMatrix(m_LocalMatrix, parentInverse, m_WorldMatrix);
     } else {
         // No parent - local matrix equals world matrix
         m_LocalMatrix = m_WorldMatrix;
@@ -2253,6 +2443,8 @@ void RCK3dEntity::WorldPositionChanged(int updateChildren, int keepScale) {
     // This is an optimization - we can update just the translation of the inverse
     // instead of recomputing the entire inverse matrix
     if ((m_MoveableFlags & VX_MOVEABLE_INVERSEWORLDMATVALID) != 0) {
+        if (!VxTryLegacyInverseTranslation(&m_InverseWorldMatrix[0][0], &m_WorldMatrix[0][0])) {
+
         // IDA: Compute new inverse translation: inv_T = -(R^T * T)
         // Where R is the rotation part and T is the translation
         // inv[3][0] = -(inv[0][0]*world[3][0] + inv[1][0]*world[3][1] + inv[2][0]*world[3][2])
@@ -2271,6 +2463,7 @@ void RCK3dEntity::WorldPositionChanged(int updateChildren, int keepScale) {
         m_InverseWorldMatrix[3][2] = -(m_InverseWorldMatrix[0][2] * tx +
                                        m_InverseWorldMatrix[1][2] * ty +
                                        m_InverseWorldMatrix[2][2] * tz);
+        }
     }
 
     // Handle children
@@ -2282,7 +2475,10 @@ void RCK3dEntity::WorldPositionChanged(int updateChildren, int keepScale) {
             RCK3dEntity *child = (RCK3dEntity *) *it;
             if (child && (child->m_MoveableFlags & VX_MOVEABLE_DONTUPDATEFROMPARENT) == 0) {
                 // Child's local = OurInverse * Child's World
-                Vx3DMultiplyMatrix(child->m_LocalMatrix, m_InverseWorldMatrix, child->m_WorldMatrix);
+                TraceEntityMatrix("child.parentinverse", child, m_InverseWorldMatrix);
+                TraceEntityMatrix("child.world.input", child, child->m_WorldMatrix);
+                MultiplyEntityMatrix(child->m_LocalMatrix, m_InverseWorldMatrix, child->m_WorldMatrix);
+                TraceEntityMatrix("child.local.after", child, child->m_LocalMatrix);
             }
         }
     } else {
@@ -2350,7 +2546,7 @@ void RCK3dEntity::SetQuaternion(const VxQuaternion *Quat, CK3dEntity *Ref, CKBOO
     if (Ref) {
         VxMatrix rot;
         Quat->ToMatrix(rot);
-        Vx3DMultiplyMatrix(m_WorldMatrix, Ref->GetWorldMatrix(), rot);
+        MultiplyEntityMatrix(m_WorldMatrix, Ref->GetWorldMatrix(), rot);
     } else {
         Quat->ToMatrix(m_WorldMatrix);
     }
@@ -2374,7 +2570,7 @@ void RCK3dEntity::GetQuaternion(VxQuaternion *Quat, CK3dEntity *Ref) {
     // - Uses FromMatrix(MatIsUnit=FALSE, RestoreMat=TRUE)
     if (Ref) {
         VxMatrix tmp;
-        Vx3DMultiplyMatrix(tmp, Ref->GetInverseWorldMatrix(), m_WorldMatrix);
+        MultiplyEntityMatrix(tmp, Ref->GetInverseWorldMatrix(), m_WorldMatrix);
         Quat->FromMatrix(tmp, FALSE, TRUE);
         return;
     }
@@ -2440,9 +2636,12 @@ void RCK3dEntity::GetScale(VxVector *Scale, CKBOOL Local) {
     VxVector axis0 = mat[0];
     VxVector axis1 = mat[1];
     VxVector axis2 = mat[2];
-    Scale->x = axis0.Magnitude();
-    Scale->y = axis1.Magnitude();
-    Scale->z = axis2.Magnitude();
+    if (!VxTryLegacyVectorMagnitude(&axis0.x,&Scale->x))
+        Scale->x = axis0.Magnitude();
+    if (!VxTryLegacyVectorMagnitude(&axis1.x,&Scale->y))
+        Scale->y = axis1.Magnitude();
+    if (!VxTryLegacyVectorMagnitude(&axis2.x,&Scale->z))
+        Scale->z = axis2.Magnitude();
 }
 
 static void RCK3dEntity_ConstructMatrix(VxMatrix &dst, const VxVector *pos, const VxVector *scale, const VxQuaternion *quat) {
@@ -2502,7 +2701,7 @@ static void RCK3dEntity_ConstructMatrixEx(VxMatrix &dst, const VxVector *pos, co
     VxMatrix quatMat;
     quat->ToMatrix(quatMat);
 
-    Vx3DMultiplyMatrix(dst, quatMat, s);
+    MultiplyEntityMatrix(dst, quatMat, s);
 
     dst[3][0] = pos->x;
     dst[3][1] = pos->y;
@@ -2750,6 +2949,7 @@ Implementation based on decompilation at 0x100088c4:
 - Calls WorldMatrixChanged(KeepChildren, 1)
 *************************************************/
 void RCK3dEntity::SetWorldMatrix(const VxMatrix &Mat, CKBOOL KeepChildren) {
+    TraceEntityMatrix("setworld.input", this, Mat);
     m_WorldMatrix = Mat;
     WorldMatrixChanged(KeepChildren, TRUE);
 }
@@ -2771,12 +2971,15 @@ Implementation based on decompilation at 0x10008909:
 const VxMatrix &RCK3dEntity::GetInverseWorldMatrix() const {
     // Lazy evaluation - compute inverse only when needed
     // IDA: if ( (this->m_MoveableFlags & 0x400000) == 0 )
-    if (!(m_MoveableFlags & VX_MOVEABLE_INVERSEWORLDMATVALID)) {
+    const std::uint64_t generation = VxGetLegacyMatrixGeneration();
+    if (!(m_MoveableFlags & VX_MOVEABLE_INVERSEWORLDMATVALID) ||
+        m_InverseArithmeticGeneration != generation) {
         // Mark as valid and compute
         // Note: const_cast required as this is logically const (caching)
         RCK3dEntity *mutableThis = const_cast<RCK3dEntity *>(this);
         mutableThis->m_MoveableFlags |= VX_MOVEABLE_INVERSEWORLDMATVALID;
         Vx3DInverseMatrix(mutableThis->m_InverseWorldMatrix, m_WorldMatrix);
+        mutableThis->m_InverseArithmeticGeneration = generation;
     }
     return m_InverseWorldMatrix;
 }
@@ -2784,7 +2987,7 @@ const VxMatrix &RCK3dEntity::GetInverseWorldMatrix() const {
 void RCK3dEntity::Transform(VxVector *Dest, const VxVector *Src, CK3dEntity *Ref) const {
     if (Ref) {
         VxMatrix tmp;
-        Vx3DMultiplyMatrix(tmp, Ref->GetInverseWorldMatrix(), m_WorldMatrix);
+        MultiplyEntityMatrix(tmp, Ref->GetInverseWorldMatrix(), m_WorldMatrix);
         Vx3DMultiplyMatrixVector(Dest, tmp, Src);
     } else {
         Vx3DMultiplyMatrixVector(Dest, m_WorldMatrix, Src);
@@ -2795,7 +2998,7 @@ void RCK3dEntity::InverseTransform(VxVector *Dest, const VxVector *Src, CK3dEnti
     const VxMatrix &invWorld = GetInverseWorldMatrix();
     if (Ref) {
         VxMatrix tmp;
-        Vx3DMultiplyMatrix(tmp, invWorld, Ref->GetWorldMatrix());
+        MultiplyEntityMatrix(tmp, invWorld, Ref->GetWorldMatrix());
         Vx3DMultiplyMatrixVector(Dest, tmp, Src);
     } else {
         Vx3DMultiplyMatrixVector(Dest, invWorld, Src);
@@ -2805,7 +3008,7 @@ void RCK3dEntity::InverseTransform(VxVector *Dest, const VxVector *Src, CK3dEnti
 void RCK3dEntity::TransformVector(VxVector *Dest, const VxVector *Src, CK3dEntity *Ref) const {
     if (Ref) {
         VxMatrix tmp;
-        Vx3DMultiplyMatrix(tmp, Ref->GetInverseWorldMatrix(), m_WorldMatrix);
+        MultiplyEntityMatrix(tmp, Ref->GetInverseWorldMatrix(), m_WorldMatrix);
         Vx3DRotateVector(Dest, tmp, Src);
     } else {
         Vx3DRotateVector(Dest, m_WorldMatrix, Src);
@@ -2816,7 +3019,7 @@ void RCK3dEntity::InverseTransformVector(VxVector *Dest, const VxVector *Src, CK
     const VxMatrix &invWorld = GetInverseWorldMatrix();
     if (Ref) {
         VxMatrix tmp;
-        Vx3DMultiplyMatrix(tmp, invWorld, Ref->GetWorldMatrix());
+        MultiplyEntityMatrix(tmp, invWorld, Ref->GetWorldMatrix());
         Vx3DRotateVector(Dest, tmp, Src);
     } else {
         Vx3DRotateVector(Dest, invWorld, Src);
@@ -2826,7 +3029,7 @@ void RCK3dEntity::InverseTransformVector(VxVector *Dest, const VxVector *Src, CK
 void RCK3dEntity::TransformMany(VxVector *Dest, const VxVector *Src, int count, CK3dEntity *Ref) const {
     if (Ref) {
         VxMatrix tmp;
-        Vx3DMultiplyMatrix(tmp, Ref->GetInverseWorldMatrix(), m_WorldMatrix);
+        MultiplyEntityMatrix(tmp, Ref->GetInverseWorldMatrix(), m_WorldMatrix);
         Vx3DMultiplyMatrixVectorMany(Dest, tmp, Src, count, sizeof(VxVector));
     } else {
         Vx3DMultiplyMatrixVectorMany(Dest, m_WorldMatrix, Src, count, sizeof(VxVector));
@@ -2837,7 +3040,7 @@ void RCK3dEntity::InverseTransformMany(VxVector *Dest, const VxVector *Src, int 
     const VxMatrix &invWorld = GetInverseWorldMatrix();
     if (Ref) {
         VxMatrix tmp;
-        Vx3DMultiplyMatrix(tmp, invWorld, Ref->GetWorldMatrix());
+        MultiplyEntityMatrix(tmp, invWorld, Ref->GetWorldMatrix());
         Vx3DMultiplyMatrixVectorMany(Dest, tmp, Src, count, sizeof(VxVector));
     } else {
         Vx3DMultiplyMatrixVectorMany(Dest, invWorld, Src, count, sizeof(VxVector));
@@ -2853,7 +3056,7 @@ void RCK3dEntity::ChangeReferential(CK3dEntity *Ref) {
         Vx3DInverseMatrix(invRef, Ref->GetWorldMatrix());
 
         VxMatrix newLocal;
-        Vx3DMultiplyMatrix(newLocal, invRef, world);
+        MultiplyEntityMatrix(newLocal, invRef, world);
         SetParent(Ref, TRUE);
         SetLocalMatrix(newLocal, TRUE);
     } else {
@@ -3366,3 +3569,73 @@ CK3dEntity *RCK3dEntity::CreateInstance(CKContext *Context) {
     RCK3dEntity *ent = new RCK3dEntity(Context, nullptr);
     return reinterpret_cast<CK3dEntity *>(ent);
 }
+
+// Snapshot transfer deliberately bypasses SetLocal/WorldMatrix: their parent
+// products are not inverse operations in finite precision and propagate to
+// children. Hierarchy reconstruction and ordinary setters must finish first.
+#if defined(_WIN32)
+#define CK_TRANSFORM_EXPORT __declspec(dllexport)
+#else
+#define CK_TRANSFORM_EXPORT __attribute__((visibility("default")))
+#endif
+extern "C" CK_TRANSFORM_EXPORT int CKCaptureEntityTransformState(
+    CKObject *object, CKEntityTransformState *state, std::size_t bytes) {
+    if (!object || !state || bytes != sizeof(*state) ||
+        !CKIsChildClassOf(object->GetClassID(), CKCID_3DENTITY))
+        return 0;
+    auto *entity = static_cast<RCK3dEntity *>(object);
+    *state = CKEntityTransformState{};
+    state->object = entity->GetID();
+    state->parent = entity->m_Parent ? entity->m_Parent->GetID() : 0;
+    state->local = entity->m_LocalMatrix;
+    state->world = entity->m_WorldMatrix;
+    state->inverseValid =
+        (entity->m_MoveableFlags & VX_MOVEABLE_INVERSEWORLDMATVALID) != 0;
+    state->inverseGeneration = entity->m_InverseArithmeticGeneration;
+    // Never force a lazy inverse calculation just to capture state.
+    if (state->inverseValid) state->inverse = entity->m_InverseWorldMatrix;
+    state->hasLastFrame = entity->m_LastFrameMatrix != nullptr;
+    if (state->hasLastFrame) state->lastFrame = *entity->m_LastFrameMatrix;
+    return 1;
+}
+
+extern "C" CK_TRANSFORM_EXPORT int CKRestoreEntityTransformState(
+    CKObject *object, const CKEntityTransformState *state, std::size_t bytes) {
+    if (!object || !state || bytes != sizeof(*state) || state->version != 1 ||
+        object->GetID() != state->object ||
+        !CKIsChildClassOf(object->GetClassID(), CKCID_3DENTITY))
+        return 0;
+    auto *entity = static_cast<RCK3dEntity *>(object);
+    if ((entity->m_Parent ? entity->m_Parent->GetID() : 0) != state->parent)
+        return 0;
+    std::unique_ptr<VxMatrix> lastFrame;
+    if (state->hasLastFrame && !entity->m_LastFrameMatrix) {
+        lastFrame.reset(new (std::nothrow) VxMatrix());
+        if (!lastFrame) return 0;
+    }
+    entity->m_LocalMatrix = state->local;
+    entity->m_WorldMatrix = state->world;
+    entity->m_InverseArithmeticGeneration = state->inverseGeneration;
+    entity->m_MoveableFlags &= ~(VX_MOVEABLE_INVERSEWORLDMATVALID |
+        VX_MOVEABLE_UPTODATE | VX_MOVEABLE_BOXVALID | VX_MOVEABLE_EXTENTSUPTODATE);
+    if (state->inverseValid) {
+        entity->m_InverseWorldMatrix = state->inverse;
+        entity->m_MoveableFlags |= VX_MOVEABLE_INVERSEWORLDMATVALID;
+    }
+    if (state->hasLastFrame) {
+        if (lastFrame) entity->m_LastFrameMatrix = lastFrame.release();
+        *entity->m_LastFrameMatrix = state->lastFrame;
+    } else {
+        delete entity->m_LastFrameMatrix;
+        entity->m_LastFrameMatrix = nullptr;
+    }
+    if (entity->m_SceneGraphNode) entity->m_SceneGraphNode->InvalidateBox(TRUE);
+    if (!(entity->m_MoveableFlags & VX_MOVEABLE_HASMOVED)) {
+        entity->m_MoveableFlags |= VX_MOVEABLE_HASMOVED;
+        if (auto *render = static_cast<RCKRenderManager *>(entity->GetCKContext()->GetRenderManager()))
+            render->AddMovedEntity(entity);
+    }
+    entity->m_MoveableFlags &= ~VX_MOVEABLE_RESERVED2;
+    return 1;
+}
+#undef CK_TRANSFORM_EXPORT

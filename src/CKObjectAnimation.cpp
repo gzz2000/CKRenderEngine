@@ -565,7 +565,10 @@ CKERROR RCKObjectAnimation::Load(CKStateChunk *chunk, CKFile *file) {
                     const int bufferBytes = static_cast<int>(dataSize) * 4;
                     int readSize = 0;
                     // Factory aliases use the controller's canonical type.
-                    switch (ctrl->GetType()) {
+                    // GetType() exposes the serialized controller tag as a
+                    // CKDWORD.  Dispatch it as the actual enum so clang-cl
+                    // accepts tags with bit 31 set just as MSVC does.
+                    switch (static_cast<CKANIMATION_CONTROLLER>(ctrl->GetType())) {
                     case CKANIMATION_LINPOS_CONTROL:
                         readSize = static_cast<RCKLinearPositionController *>(ctrl)->ReadKeysFromBuffer(buffer, bufferBytes);
                         break;

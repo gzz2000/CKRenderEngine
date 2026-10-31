@@ -22,6 +22,7 @@ class RCKMesh : public CKMesh {
     friend int RayIntersectionGenericFunc(RCKMesh *mesh, VxVector &origin, VxVector &direction, 
                                                VxIntersectionDesc *desc, CK_RAYINTERSECTION mode, 
                                                const VxMatrix &worldMatrix);
+    friend struct CKRenderCallbackSnapshotAccess;
 public:
 
     void GetRasterizerBufferState(RCKMeshBufferState &State) const;

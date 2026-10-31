@@ -12,6 +12,7 @@
 // Bits 18-23 (0x00EC0000): SecondaryAnimationMode
 
 class RCKAnimation : public CKAnimation {
+    friend struct CKAnimationSnapshotAccess;
     friend class RCKCharacter;  // Allow RCKCharacter to access protected members
 public:
     explicit RCKAnimation(CKContext *Context, CKSTRING name = nullptr);

@@ -7,6 +7,7 @@
 #include "RCKAnimation.h"
 
 class RCKKeyedAnimation : public RCKAnimation {
+    friend struct CKAnimationSnapshotAccess;
     friend class RCKCharacter;  // Allow RCKCharacter to access protected members
 public:
 

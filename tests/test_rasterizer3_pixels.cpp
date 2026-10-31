@@ -96,12 +96,13 @@ struct Backend {
 
 CKBOOL OpenBackend(Backend &b, int width, int height)
 {
-    b.Window = SDL_CreateWindow("rasterizer3-pixels", 640, 480, SDL_WINDOW_RESIZABLE);
+    b.Window = SDL_CreateWindow("rasterizer3-pixels", width, height, SDL_WINDOW_RESIZABLE);
     TestCheckf(b.Window != NULL, "SDL visible window creation failed: %s", SDL_GetError());
     if (!b.Window)
         return FALSE;
     SDL_ShowWindow(b.Window);
     SDL_RaiseWindow(b.Window);
+    SDL_SyncWindow(b.Window);
     CKSdlGpuRasterizerGetInfo(&b.Info);
     TestCheck(b.Info.InterfaceRevision == CKRST_INTERFACE_REVISION,
               "plugin reports the current interface revision");
@@ -4074,6 +4075,8 @@ void CheckResizeAndReadback(Backend &b)
     TestCheck(pendingResize.Calls == 0, "resize starts with an outstanding callback");
     TestCheck(SDL_SetWindowSize(b.Window, 320, 640) && SDL_SyncWindow(b.Window), "portrait window resize");
     TestCheck(ctx->Resize(0, 0, 48, 96, VX_RESIZE_NOMOVE), "portrait context resize with Player flags");
+    int drawableWidth = 0, drawableHeight = 0;
+    TestCheck(SDL_GetWindowSizeInPixels(b.Window, &drawableWidth, &drawableHeight), "drawable dimensions");
     const CKRasterizerContextDesc resized = ReadContextDesc(ctx);
     TestCheck(resized.Width == 48 && resized.Height == 96,
               "resized context size");
@@ -4092,7 +4095,7 @@ void CheckResizeAndReadback(Backend &b)
             TestCheck(ctx->EndScene(), "EndScene (readback wait)");
         }
     }
-    TestCheckf(capture.Calls == 1 && capture.Success && capture.Width == 48 && capture.Height == 96,
+    TestCheckf(capture.Calls == 1 && capture.Success && capture.Width == drawableWidth && capture.Height == drawableHeight,
                "asynchronous readback: calls=%d ok=%d size=%dx%d", capture.Calls, (int)capture.Success,
                capture.Width, capture.Height);
 
@@ -4100,8 +4103,40 @@ void CheckResizeAndReadback(Backend &b)
     RenderAndRead(ctx, CKRST_CTXCLEAR_COLOR, NULL, [&]() {
         TestCheck(DrawColorTriangle(ctx, kCenterTriangle, kGreen), "draw after resize");
     }, pixels);
-    TestCheck(pixels.Width == 48 && pixels.Height == 96, "synchronous readback follows the new size");
-    TestCheckf(PixelNear(pixels, 24, 48, 0, 255, 0), "portrait frame centre must be green");
+    TestCheck(pixels.Width == drawableWidth && pixels.Height == drawableHeight, "synchronous readback follows the new size");
+    TestCheckf(PixelNear(pixels, drawableWidth/2, drawableHeight/2, 0, 255, 0), "portrait frame centre must be green");
+    // Physical centre lies outside the 48x96 logical viewport: both APIs
+    // must accept it, and reject rectangles outside the actual drawable.
+    CKRECT centre = {drawableWidth/2-2, drawableHeight/2-2,
+                     drawableWidth/2+2, drawableHeight/2+2};
+    CKBYTE centreBytes[64] = {};
+    VxImageDescEx centreImage;
+    memset(&centreImage, 0, sizeof(centreImage));
+    TestCheck(ctx->CopyToMemoryBuffer(&centre, VXBUFFER_BACKBUFFER, centreImage) == 64,
+              "physical crop size query");
+    centreImage.Image = centreBytes;
+    TestCheck(ctx->CopyToMemoryBuffer(&centre, VXBUFFER_BACKBUFFER, centreImage) == 64 &&
+              centreImage.Width == 4 && centreImage.Height == 4,
+              "physical crop readback");
+    for (int i=0; i<16; ++i)
+        TestCheck(centreBytes[i*4] == 0 && centreBytes[i*4+1] == 255 && centreBytes[i*4+2] == 0,
+                  "physical crop preserves green centre pixels");
+    ReadbackCapture cropped;
+    TestCheck(ctx->RequestReadback(&centre, VXBUFFER_BACKBUFFER, ReadbackCapture::Callback, &cropped),
+              "asynchronous physical crop");
+    const Uint64 cropDeadline = SDL_GetTicks()+5000;
+    while (cropped.Calls == 0 && SDL_GetTicks()<cropDeadline) {
+        TestCheck(ctx->BackToFront(FALSE), "submit physical crop");
+        SDL_Delay(1);
+    }
+    TestCheck(cropped.Calls == 1 && cropped.Success && cropped.Width == 4 && cropped.Height == 4 &&
+              PixelNear(cropped.Image, 2, 2, 0, 255, 0), "asynchronous physical crop pixels");
+    CKRECT invalid = {0, 0, drawableWidth+1, drawableHeight};
+    VxImageDescEx invalidImage;
+    memset(&invalidImage, 0, sizeof(invalidImage));
+    TestCheck(ctx->CopyToMemoryBuffer(&invalid, VXBUFFER_BACKBUFFER, invalidImage) == 0 &&
+              !ctx->RequestReadback(&invalid, VXBUFFER_BACKBUFFER, ReadbackCapture::Callback, &cropped),
+              "out-of-drawable crops rejected by both APIs");
     TestCheck(ctx->IsIdle(), "idle after the readbacks");
     TestCheck(pendingResize.Calls == 1 && pendingResize.Success && pendingResize.Width == 64 && pendingResize.Height == 64,
               "outstanding readback retains its old dimensions across resize");
@@ -4139,7 +4174,7 @@ void CheckPresentation(Backend &b)
         TestCheck(DrawColorTriangle(ctx, diagonal, kGreen), "diagonal triangle");
     }, plain);
     const int plainBlended = CountBlendedGreenPixels(plain);
-    TestCheckf(PixelNear(plain, 40, 80, 0, 255, 0), "inside of the diagonal triangle must be green");
+    TestCheckf(PixelNear(plain, plain.Width*5/6, plain.Height*5/6, 0, 255, 0), "inside of the diagonal triangle must be green");
 
     CKRasterizerCapsDesc available;
     TestCheck(ctx->GetCaps(&available), "MSAA capabilities");
@@ -4159,7 +4194,7 @@ void CheckPresentation(Backend &b)
     const CKDWORD msaaApproximated =
         ReadStats(ctx).Diagnostics[CKRST_DIAG_APPROX_MSAA];
     TestCheckf(msaa.Width == plain.Width && msaa.Height == plain.Height, "MSAA readback keeps the window size");
-    TestCheckf(PixelNear(msaa, 40, 80, 0, 255, 0), "inside of the MSAA triangle must be green");
+    TestCheckf(PixelNear(msaa, msaa.Width*5/6, msaa.Height*5/6, 0, 255, 0), "inside of the MSAA triangle must be green");
     TestCheckf(msaaApproximated == 0 && msaaBlended >= plainBlended + 16,
                "MSAA 4 must blend the diagonal edge without fallback (plain=%d msaa=%d approximated=%u)",
                plainBlended, msaaBlended, (unsigned)msaaApproximated);
@@ -4174,8 +4209,8 @@ void CheckPresentation(Backend &b)
         TestCheck(DrawColorTriangle(ctx, diagonal, kGreen), "diagonal triangle (RenderScale 0.5)");
     }, scaled);
     TestCheckf(scaled.Width == plain.Width && scaled.Height == plain.Height, "scaled readback keeps the window size");
-    TestCheckf(PixelNear(scaled, 40, 80, 0, 255, 0), "inside of the scaled triangle must be green");
-    TestCheckf(PixelNear(scaled, 8, 16, 0, 0, 0), "outside of the scaled triangle must stay black");
+    TestCheckf(PixelNear(scaled, scaled.Width*5/6, scaled.Height*5/6, 0, 255, 0), "inside of the scaled triangle must be green");
+    TestCheckf(PixelNear(scaled, scaled.Width/6, scaled.Height/6, 0, 0, 0), "outside of the scaled triangle must stay black");
 
     CKRasterizerOptions defaults;
     TestCheck(ctx->SetOptions(&defaults), "SetOptions(defaults)");
@@ -4215,12 +4250,12 @@ void CheckViewport(Backend &b)
             TestCheck(DrawColorTriangle(ctx, covering, kGreen), "triangle in the right half");
             TestCheck(ctx->SetViewport(&full), "full viewport");
         }, pixels);
-        TestCheckf(PixelNear(pixels, width * 3 / 4, height * 3 / 5, 0, 255, 0),
+        TestCheckf(PixelNear(pixels, pixels.Width * 3 / 4, pixels.Height * 3 / 5, 0, 255, 0),
                    "RenderScale %.1f: the viewport triangle must land in the right half", scales[i]);
-        TestCheckf(PixelNear(pixels, width / 4, height * 3 / 5, 0, 0, 0),
+        TestCheckf(PixelNear(pixels, pixels.Width / 4, pixels.Height * 3 / 5, 0, 0, 0),
                    "RenderScale %.1f: the left half must stay clear", scales[i]);
-        TestCheckf(PixelNear(pixels, width / 2 - 2, height * 3 / 5, 0, 0, 0) &&
-                       PixelNear(pixels, width / 2 + 1, height * 3 / 5, 0, 255, 0),
+        TestCheckf(PixelNear(pixels, (width / 2 - 2)*pixels.Width/width, pixels.Height * 3 / 5, 0, 0, 0) &&
+                       PixelNear(pixels, (width / 2 + 1)*pixels.Width/width, pixels.Height * 3 / 5, 0, 255, 0),
                    "RenderScale %.1f: the viewport must clip at its left edge", scales[i]);
     }
     CKRasterizerOptions defaults;
@@ -4308,11 +4343,12 @@ void CheckRenderTargetReadback(Backend &b)
     RenderAndRead(ctx, CKRST_CTXCLEAR_COLOR, NULL, [&]() {
         TestCheck(DrawColorTriangle(ctx, kCenterTriangle, kGreen), "window triangle after the target");
     }, pixels);
-    TestCheck(pixels.Width == contextDesc.Width &&
-                  pixels.Height == contextDesc.Height,
+    int drawableWidth = 0, drawableHeight = 0;
+    TestCheck(SDL_GetWindowSizeInPixels(b.Window, &drawableWidth, &drawableHeight), "restored drawable size");
+    TestCheck(pixels.Width == drawableWidth && pixels.Height == drawableHeight,
               "window readback size");
-    TestCheckf(PixelNear(pixels, contextDesc.Width / 2,
-                         contextDesc.Height * 3 / 5, 0, 255, 0),
+    TestCheckf(PixelNear(pixels, pixels.Width / 2,
+                         pixels.Height * 3 / 5, 0, 255, 0),
                "window readback after the target");
 }
 

@@ -499,6 +499,15 @@ void RCKSprite3D::UpdateOrientation(CKRenderContext *rc) {
 
     const VxMatrix &rootWorld = rootEntity->m_WorldMatrix;
 
+    // Facing the camera changes orientation, not the sprite's position in its
+    // parent's space. WorldMatrixChanged recomputes local = inverse(parent) *
+    // world; that round trip can change the translation by a few ulps even
+    // though world translation is unchanged. TT Extra reads this local
+    // position on the next simulation tick, so culling/render frequency used
+    // to change collectible orbits. Preserve the existing translation while
+    // still updating orientation, child transforms and render invalidation.
+    const VxVector localPosition = m_LocalMatrix[3];
+
     const CKDWORD mode = m_Mode;
     if (mode == VXSPRITE3D_BILLBOARD) {
         // IDA: memcpy 0x30 bytes from root entity world matrix to this world matrix
@@ -550,6 +559,7 @@ void RCKSprite3D::UpdateOrientation(CKRenderContext *rc) {
 
         WorldMatrixChanged(TRUE, TRUE);
     }
+    m_LocalMatrix[3] = localPosition;
 }
 
 //=============================================================================

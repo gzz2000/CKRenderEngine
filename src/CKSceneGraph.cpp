@@ -620,6 +620,14 @@ void CKSceneGraphNode::NoTestsTraversal(RCKRenderContext *dev, CKDWORD flags) {
 }
 
 void CKSceneGraphRootNode::RenderTransparentObjects(RCKRenderContext *rc, CKDWORD flags) {
+    // m_TimeFpsCalc is an FPS sample counter, reset against wall time. It is
+    // not a unique frame ID: an unvisited node can retain a matching old value
+    // and incorrectly survive transparent filtering. Start every traversal
+    // with all retained entries unvisited; actual visits overwrite the marker.
+    // Unsigned subtraction remains unequal even when the FPS counter is zero.
+    if (!rc) return;
+    for (auto &entry : m_TransparentObjects)
+        entry.m_Node->m_TimeFpsCalc = rc->m_TimeFpsCalc - CKDWORD(1);
     RenderTransparentObjectsRecursive(this, this, rc, flags);
 }
 

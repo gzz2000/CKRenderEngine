@@ -7,6 +7,7 @@
 
 class RCKRenderObject : public CKRenderObject {
     friend struct CKSceneGraphNode;
+    friend struct CKRenderCallbackSnapshotAccess;
 public:
     void AddToRenderContext(CKRenderContext *context);
     void RemoveFromRenderContext(CKRenderContext *context);
@@ -44,6 +45,8 @@ public:
     static void Register();
     static CKRenderObject *CreateInstance(CKContext *Context);
     static CK_CLASSID m_ClassID;
+
+    const CKCallbacksContainer *GetCallbackContainer() const { return m_Callbacks; }
 
     CKDWORD GetInRenderContextMask() const { return m_InRenderContext; }
 

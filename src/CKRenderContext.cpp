@@ -1,3 +1,4 @@
+#include "CKRenderCallbackSnapshotInternal.h"
 #include "CKRenderProfile.h"
 #include "RCKRenderContext.h"
 
@@ -3022,6 +3023,7 @@ RCKRenderContext::RCKRenderContext(CKContext *Context, CKSTRING name) : CKRender
 }
 
 RCKRenderContext::~RCKRenderContext() {
+    CKInvalidateRenderCallbackOwner(this);
     // Based on IDA at 0x10066ebb
     if (!DestroyDevice() && m_RenderManager) {
         m_RenderManager->ForgetRasterizerContext(m_RasterizerContext);

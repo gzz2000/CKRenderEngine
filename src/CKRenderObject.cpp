@@ -1,3 +1,4 @@
+#include "CKRenderCallbackSnapshotInternal.h"
 #include "RCKRenderObject.h"
 
 #include "CKSceneGraph.h"
@@ -131,6 +132,7 @@ RCKRenderObject::RCKRenderObject(CKContext *Context, CKSTRING name) : CKRenderOb
 }
 
 RCKRenderObject::~RCKRenderObject() {
+    CKInvalidateRenderCallbackOwner(this);
     // IDA @ 0x1000d870 - destructor calls RemoveAllCallbacks
     RCKRenderObject::RemoveAllCallbacks();
 }

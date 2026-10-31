@@ -5484,7 +5484,8 @@ Chunk LegacyNormalOnlyChunk() {
 template<int Format>
 void LegacyNormalOnlySnapshotUpdatesExistingMorph() {
     CKContext context(nullptr, 0, 0); ObjectCloneProbe animation(&context, "NormalOnlyOwner");
-    Chunk initial = AnimationWithController(CKANIMATION_MORPH_CONTROL, MorphWire<true>());
+    WireWords initialWords = MorphWire<true>();
+    Chunk initial = AnimationWithController(CKANIMATION_MORPH_CONTROL, initialWords);
     LoadChunk(animation, initial.get());
     CKMorphController *controller = animation.GetMorphController();
     CKKeyframeData *data = animation.Data();
@@ -5537,7 +5538,8 @@ template<int Format>
 void LegacyNormalAllocationFailureKeepsTheFailingKeyPayload() {
     for (int failure = 0; failure < (Format == 1 ? 1 : 2); ++failure) {
         CKContext context(nullptr, 0, 0); RCKObjectAnimation animation(&context, "NormalOnlyFailure");
-        Chunk initial = AnimationWithController(CKANIMATION_MORPH_CONTROL, MorphWire<true>()); LoadChunk(animation, initial.get());
+        WireWords initialWords = MorphWire<true>();
+        Chunk initial = AnimationWithController(CKANIMATION_MORPH_CONTROL, initialWords); LoadChunk(animation, initial.get());
         CKMorphController *controller = animation.GetMorphController();
         CKMorphKey *key = static_cast<CKMorphKey *>(controller->GetKey(0));
         VxCompressedVector *normals = key->NormArray; VxVector *positions = key->PosArray;
@@ -6068,8 +6070,14 @@ void ObjectPlaybackTransitionMorphReuseResetsTimelineAndMeshFallbackNormals() {
     target.CreateTransition(4,&empty,0,&out,1,FALSE,FALSE,nullptr);
     Check(target.HasMorphNormalInfo() && target.EvaluateMorphTarget(0,3,result,sizeof(VxVector),normals) && Equal(result[0],VxVector(20,30,40)),
           "Mesh fallback transition lost source mesh position/normal channel");
+    const VxCompressedVector expectedNormal(0, 1, 0);
+    Check(normals[0].xa == expectedNormal.xa && normals[0].ya == expectedNormal.ya,
+          "Mesh fallback must retain the encoded mesh normal exactly");
     VxVector decoded; decoded=normals[0];
-    Check(std::fabs(decoded.x)<0.0002f && std::fabs(decoded.z)<0.0002f && std::fabs(decoded.y-1)<0.0002f,
+    // Truncating the 14-bit angular encoding can lose one whole unit;
+    // asin(float) may return the value immediately below pi/2 on macOS.
+    const float oneAngularUnit = 0.000384f; // slightly above 2*pi/16384
+    Check(std::fabs(decoded.x)<oneAngularUnit && std::fabs(decoded.z)<oneAngularUnit && std::fabs(decoded.y-1)<oneAngularUnit,
           "Mesh fallback transition did not preserve mesh normal direction within angular quantization");
     Check(target.SetStep(1)==CK_OK && Equal(*reinterpret_cast<VxVector *>(mesh.GetModifierVertices(&pStride)),VxVector(10,7,8)),
           "Morph transition destination did not reach actual mesh");
@@ -6209,7 +6217,8 @@ void LegacyMorphPositionsCoverDeclaredVertices() {
 template<int Format>
 void LegacyNormalsCoverDeclaredVertices() {
     CKContext context(nullptr, 0, 0); RCKObjectAnimation animation(&context, "LegacyShortNormals");
-    Chunk initial = AnimationWithController(CKANIMATION_MORPH_CONTROL, MorphWire<true>()); LoadChunk(animation, initial.get());
+    WireWords initialWords = MorphWire<true>();
+    Chunk initial = AnimationWithController(CKANIMATION_MORPH_CONTROL, initialWords); LoadChunk(animation, initial.get());
     CKMorphKey *key = static_cast<CKMorphKey *>(animation.GetMorphController()->GetKey(0));
     VxCompressedVector *old = key->NormArray;
     Chunk chunk = NewChunk(CKCID_OBJECTANIMATION, 1);
@@ -6225,7 +6234,8 @@ template<int Format>
 void LegacyNormalRecordsStopAtTheirIdentifier() {
     for (int stage = 0; stage < 2; ++stage) {
         CKContext context(nullptr, 0, 0); RCKObjectAnimation animation(&context, "LegacyNormalBoundary");
-        Chunk initial = AnimationWithController(CKANIMATION_MORPH_CONTROL, MorphWire<true>()); LoadChunk(animation, initial.get());
+        WireWords initialWords = MorphWire<true>();
+        Chunk initial = AnimationWithController(CKANIMATION_MORPH_CONTROL, initialWords); LoadChunk(animation, initial.get());
         CKMorphKey *key = static_cast<CKMorphKey *>(animation.GetMorphController()->GetKey(0));
         VxCompressedVector *old = key->NormArray;
         Chunk chunk = NewChunk(CKCID_OBJECTANIMATION, 1);

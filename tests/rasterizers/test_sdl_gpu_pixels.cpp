@@ -1019,6 +1019,20 @@ int main(int argc, char **argv)
         if (!start) { SDL_DestroyWindow(window); SDL_Quit(); return 18; }
         SDL_SetWindowTitle(window, "SDL_gpu rasterizer pixel tests");
     }
+    // Cocoa focus notifications arrive asynchronously. Pump real OS events
+    // before checking foreground acceptance; SDL_SyncWindow does not wait for
+    // an input-focus event. Never waive the foreground requirement.
+    const Uint64 focusDeadline = SDL_GetTicks() + 2000;
+    while (!(SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) &&
+           SDL_GetTicks() < focusDeadline) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_EVENT_QUIT) {
+                SDL_DestroyWindow(window); SDL_Quit(); return 18;
+            }
+        }
+        SDL_Delay(10);
+    }
     const SDL_WindowFlags visibleFlags = SDL_GetWindowFlags(window);
     if (!(visibleFlags & SDL_WINDOW_INPUT_FOCUS) || (visibleFlags & SDL_WINDOW_HIDDEN)) {
         std::fprintf(stderr, "visible GPU acceptance requires a shown foreground window (flags=0x%llx)\n",

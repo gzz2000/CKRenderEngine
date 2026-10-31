@@ -147,15 +147,17 @@ CKBOOL CKSdlGpuRasterizerContext::RequestReadback(const CKRECT *Rect, VXBUFFER_T
         Diag(CKRST_DIAG_REJECT_INVALID_PARAMETER);
         return FALSE;
     }
-    const CKRECT target = LogicalTargetRect();
-    if (!ValidateRect(Rect, (CKDWORD)target.right, (CKDWORD)target.bottom)) {
-        Diag(CKRST_DIAG_REJECT_INVALID_PARAMETER);
-        return FALSE;
-    }
     if (!CanReadCurrentTarget()) {
         // Cube-face targets and frames outside the internal targets have no
         // readback source.
         Diag(CKRST_DIAG_REJECT_UNSUPPORTED_STATE);
+        return FALSE;
+    }
+    // Readback returns physical pixels. Crops use that same coordinate
+    // system, including when the drawable differs from the logical context.
+    const CKRECT target = m_TargetState.IsActive() ? LogicalTargetRect() : NativeTargetRect();
+    if (!ValidateRect(Rect, (CKDWORD)target.right, (CKDWORD)target.bottom)) {
+        Diag(CKRST_DIAG_REJECT_INVALID_PARAMETER);
         return FALSE;
     }
     PendingReadback *readback = new PendingReadback();
@@ -263,13 +265,14 @@ int CKSdlGpuRasterizerContext::CopyToMemoryBuffer(const CKRECT *Rect, VXBUFFER_T
         Diag(CKRST_DIAG_REJECT_SCENE_STATE);
         return 0;
     }
-    const CKRECT target = LogicalTargetRect();
-    if (!ValidateRect(Rect, (CKDWORD)target.right, (CKDWORD)target.bottom)) {
-        Diag(CKRST_DIAG_REJECT_INVALID_PARAMETER);
-        return 0;
-    }
     if (!CanReadCurrentTarget()) {
         Diag(CKRST_DIAG_REJECT_UNSUPPORTED_STATE); // cube-face targets, no internal targets
+        return 0;
+    }
+
+    const CKRECT target = m_TargetState.IsActive() ? LogicalTargetRect() : NativeTargetRect();
+    if (!ValidateRect(Rect, (CKDWORD)target.right, (CKDWORD)target.bottom)) {
+        Diag(CKRST_DIAG_REJECT_INVALID_PARAMETER);
         return 0;
     }
 
