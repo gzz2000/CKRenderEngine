@@ -1,0 +1,8 @@
+if (NOT EMSCRIPTEN OR NOT CKRE_BUILD_STATIC)
+    message(FATAL_ERROR "CKWebGpuRasterizer requires a static Emscripten build")
+endif ()
+add_library(CKWebGpuRasterizerStatic STATIC CKWebGpuRasterizer.cpp)
+target_compile_features(CKWebGpuRasterizerStatic PRIVATE cxx_std_20)
+target_compile_definitions(CKWebGpuRasterizerStatic PRIVATE CK_LIB=1)
+target_link_libraries(CKWebGpuRasterizerStatic PRIVATE CKFFPLib)
+ckre_apply_platform_definitions(CKWebGpuRasterizerStatic PRIVATE)

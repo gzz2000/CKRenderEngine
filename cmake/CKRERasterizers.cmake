@@ -15,7 +15,8 @@ function(ckre_get_rasterizers OUT_ENABLED OUT_DISABLED_BINARIES STATIC_REGISTRAT
     set(_disabled CKBgfxRasterizer)
     # Target | build option | default
     foreach (_entry IN ITEMS
-            "CKSdlGpuRasterizer|CKRE_BUILD_SDL_GPU_RASTERIZER|ON")
+            "CKSdlGpuRasterizer|CKRE_BUILD_SDL_GPU_RASTERIZER|ON"
+            "CKWebGpuRasterizer|CKRE_BUILD_WEBGPU_RASTERIZER|OFF")
         string(REPLACE "|" ";" _fields "${_entry}")
         list(GET _fields 0 _target)
         list(GET _fields 1 _option)

@@ -249,6 +249,11 @@ if (CKRE_BUILD_STATIC)
         target_link_libraries(CK2_3DStatic PRIVATE $<BUILD_INTERFACE:CKSdlGpuRasterizerStatic>)
     endif ()
 
+    if (TARGET CKWebGpuRasterizerStatic)
+        target_compile_definitions(CK2_3DStatic PRIVATE CKRE_STATIC_WEBGPU_RASTERIZER=1)
+        target_link_libraries(CK2_3DStatic PRIVATE $<BUILD_INTERFACE:CKWebGpuRasterizerStatic>)
+    endif ()
+
     # Static library specific settings
     set_target_properties(CK2_3DStatic PROPERTIES
             ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"

@@ -36,6 +36,7 @@ endif ()
 option(CKRE_BUILD_SHARED "Build shared library" ON)
 option(CKRE_BUILD_STATIC "Build static library" OFF)
 option(CKRE_BUILD_SDL_GPU_RASTERIZER "Build SDL_gpu rasterizer plugin targets" ON)
+option(CKRE_BUILD_WEBGPU_RASTERIZER "Build the browser WebGPU rasterizer" OFF)
 # Graphics APIs of the platform. Shader formats and identities are portable;
 # their emitters, embedded shaders and API paths are built for these only.
 include(CMakeDependentOption)

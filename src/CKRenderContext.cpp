@@ -1241,6 +1241,10 @@ CKERROR RCKRenderContext::Resize(int PosX, int PosY, int SizeX, int SizeY, CKDWO
         m_WindowSettings.m_Rect.right = SizeX;
         m_WindowSettings.m_Rect.bottom = SizeY;
         if (!m_TargetTexture) {
+            // Camera-ratio layout reads m_Settings, so publish the accepted
+            // size before recomputing it. Using the previous dimensions leaves
+            // the viewport one resize behind (and breaks pointer hit testing).
+            m_Settings = m_WindowSettings;
             SetFullViewport(&m_ViewportData, SizeX, SizeY);
             m_ProjectionUpdated = FALSE;
             m_RenderedScene->UpdateViewportSize(FALSE,

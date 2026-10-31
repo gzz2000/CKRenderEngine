@@ -156,6 +156,10 @@ static void RegisterNullRasterizer() {
 
 void EnumerateRasterizers() {
     if (!g_EnumerationDone) {
+#if defined(CKRE_STATIC_WEBGPU_RASTERIZER)
+        extern void CKWebGpuRasterizerGetInfo(CKRasterizerInfo *info);
+        RegisterStaticRasterizer(CKWebGpuRasterizerGetInfo, "CKWebGpuRasterizer");
+#endif
 #if defined(CKRE_STATIC_SDL_GPU_RASTERIZER)
         extern void CKSdlGpuRasterizerGetInfo(CKRasterizerInfo *info);
         RegisterStaticRasterizer(CKSdlGpuRasterizerGetInfo, "CKSdlGpuRasterizer");
