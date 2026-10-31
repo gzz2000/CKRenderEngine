@@ -3220,10 +3220,11 @@ void RCKRenderContext::UpdateProjection(CKBOOL forceUpdate) {
             const float cameraAspect = cameraWidth > 0 && cameraHeight > 0
                 ? float(cameraWidth) / float(cameraHeight) : 4.0f / 3.0f;
             // Virtools stores horizontal FOV. Preserve the authored vertical
-            // FOV, revealing more horizontally in a wide browser. Always derive
+            // FOV on wide displays; on narrow displays preserve horizontal FOV
+            // and reveal more vertically instead of cropping. Always derive
             // from the camera, never from the previous adapted value. m_Fov is
             // also consumed by frustum culling and the standard picking ray.
-            m_Fov = 2.0f * atanf(tanf(camera->GetFov() * 0.5f) * aspect / cameraAspect);
+            m_Fov = 2.0f * atanf(tanf(camera->GetFov() * 0.5f) * (aspect > cameraAspect ? aspect / cameraAspect : 1.0f));
         }
     }
 

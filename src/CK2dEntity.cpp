@@ -257,6 +257,20 @@ void RCK2dEntity::GetHomogeneousRelativeRect(VxRect &rect) {
         return;
     }
 
+    auto *rc = static_cast<RCKRenderContext *>(ctx);
+    if (rc && rc->m_ResponsiveViewport && !rc->m_TargetTexture) {
+        // Authored menus/HUD keep a centered 4:3 coordinate space while the
+        // independent camera fills the drawable. Rendering and picking share
+        // these rectangles, including nested entities and resize updates.
+        const float width = float(rc->m_Settings.m_Rect.right);
+        const float height = float(rc->m_Settings.m_Rect.bottom);
+        const float scale = width / 4.0f < height / 3.0f ? width / 4.0f : height / 3.0f;
+        const float x = (width - scale * 4.0f) * 0.5f;
+        const float y = (height - scale * 3.0f) * 0.5f;
+        rect = VxRect(x, y, x + scale * 4.0f, y + scale * 3.0f);
+        return;
+    }
+
     if (IsRatioOffset()) {
         if (ctx) {
             ctx->GetViewRect(rect);
