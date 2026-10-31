@@ -38,7 +38,7 @@ class BallanceGpu {
     constructor(device,context,format,canvas,modules,errors) {
         Object.assign(this,{device,context,format,canvas,modules,errors});
         this.textures=new Map();this.samplers=new Map();this.pipelines=new Map();
-        this.samples=1;this.temporary=[];this.retiredTextures=[];this.frames=0;this.draws=0;this.defaultTextures=[];
+        this.samples=1;this.uploadBlocks=[];this.uploadIndex=0;this.retiredTextures=[];this.frames=0;this.draws=0;this.defaultTextures=[];
         for (let kind=0;kind<3;++kind) {
             const id=-kind-1;this.texture(id,1,1,1,1,kind);
             for(let face=0;face<(kind===1?6:1);++face)this.upload(id,0,face,1,1,0,0,new Uint8Array([255,255,255,255]));
@@ -121,13 +121,23 @@ class BallanceGpu {
         const values=new Float32Array([((color>>>16)&255)/255,((color>>>8)&255)/255,(color&255)/255,(color>>>24)/255,depth,0,0,0]);
         const buffer=this.buffer(new Uint8Array(values.buffer),GPUBufferUsage.UNIFORM);
         this.pass.setPipeline(pipeline);
-        this.pass.setBindGroup(0,this.device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer}}]}));
+        this.pass.setBindGroup(0,this.device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:buffer}]}));
         this.pass.setScissorRect(left,top,right-left,bottom-top);this.pass.setStencilReference(stencil&255);this.pass.draw(3);
     }
     flush() {
         if(this.pass){this.pass.end();this.pass=null;}
-        if(this.encoder){this.device.queue.submit([this.encoder.finish()]);this.encoder=null;}
-        for(const buffer of this.temporary)buffer.destroy();this.temporary=[];
+        if(this.encoder){
+            // One upload per arena instead of hundreds of tiny per-draw writes.
+            // Writes precede this submission and follow the previous one on the
+            // same queue, so arena reuse needs no GPU wait or CPU spinning.
+            for(const block of this.uploadBlocks)if(block.used)this.device.queue.writeBuffer(block.gpu,0,block.bytes,0,block.used);
+            this.device.queue.submit([this.encoder.finish()]);this.encoder=null;
+        }
+        const used=this.uploadIndex+1;
+        for(const block of this.uploadBlocks)block.used=0;
+        // Keep normal frame capacity, retire rare oversized-frame spare blocks.
+        while(this.uploadBlocks.length>used&&this.uploadBlocks.reduce((n,b)=>n+b.bytes.length,0)>64*1024*1024)this.uploadBlocks.pop().gpu.destroy();
+        this.uploadIndex=0;
         for(const texture of this.retiredTextures)texture.destroy();this.retiredTextures=[];
     }
     present() {
@@ -165,16 +175,28 @@ class BallanceGpu {
     }
     deleteTexture(id){const record=this.textures.get(id);if(record){this.retiredTextures.push(record.texture);this.textures.delete(id);}}
     buffer(bytes,usage){
-        const buffer=this.device.createBuffer({size:Math.max(4,(bytes.byteLength+3)&~3),usage:usage|GPUBufferUsage.COPY_DST});
-        // writeBuffer requires a multiple of four bytes, including 16-bit indices.
-        const padded=bytes.byteLength%4?new Uint8Array((bytes.byteLength+3)&~3):bytes;
-        if(padded!==bytes)padded.set(bytes);
-        this.device.queue.writeBuffer(buffer,0,padded);this.temporary.push(buffer);return buffer;
+        const alignment=usage===GPUBufferUsage.UNIFORM?this.device.limits.minUniformBufferOffsetAlignment:4;
+        const size=Math.max(4,(bytes.byteLength+3)&~3);
+        let block,offset;
+        for(;;){
+            block=this.uploadBlocks[this.uploadIndex];
+            if(!block){
+                const capacity=Math.max(4*1024*1024,2**Math.ceil(Math.log2(size)));
+                block={bytes:new Uint8Array(capacity),used:0,gpu:this.device.createBuffer({size:capacity,
+                    usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.UNIFORM|GPUBufferUsage.VERTEX|GPUBufferUsage.INDEX})};
+                this.uploadBlocks.push(block);
+            }
+            offset=Math.ceil(block.used/alignment)*alignment;
+            if(offset+size<=block.bytes.length)break;
+            ++this.uploadIndex;
+        }
+        block.bytes.set(bytes,offset);block.used=offset+size;
+        return {buffer:block.gpu,offset,size:bytes.byteLength};
     }
     beginDraw(state,positionT,layout,vertices,count,indices,indexCount,index32){
         this.pending={state,positionT,layout,vertices,count,indices,indexCount,index32,uniforms:[],textures:[]};
     }
-    uniform(group,binding,bytes){this.pending.uniforms.push({group,binding,buffer:this.buffer(bytes,GPUBufferUsage.UNIFORM),size:bytes.byteLength});}
+    uniform(group,binding,bytes){this.pending.uniforms.push({group,binding,resource:this.buffer(bytes,GPUBufferUsage.UNIFORM)});}
     binding(slot,id,s,dimension){
         const texture=this.textures.get(id)??this.defaultTextures[dimension];
         const key=JSON.stringify(s.slice(0,10));let sampler=this.samplers.get(key);
@@ -212,17 +234,17 @@ class BallanceGpu {
         this.beginPass();const pass=this.pass,pipeline=this.pipeline(draw);
         pass.setPipeline(pipeline);
         for(const group of [1,3])pass.setBindGroup(group,this.device.createBindGroup({layout:pipeline.getBindGroupLayout(group),entries:
-            draw.uniforms.filter(u=>u.group===group).map(u=>({binding:u.binding,resource:{buffer:u.buffer,size:u.size}}))}));
+            draw.uniforms.filter(u=>u.group===group).map(u=>({binding:u.binding,resource:u.resource}))}));
         pass.setBindGroup(2,this.device.createBindGroup({layout:pipeline.getBindGroupLayout(2),entries:draw.textures}));
-        pass.setVertexBuffer(0,this.buffer(draw.vertices,GPUBufferUsage.VERTEX));
+        const vertex=this.buffer(draw.vertices,GPUBufferUsage.VERTEX);pass.setVertexBuffer(0,vertex.buffer,vertex.offset,vertex.size);
         const s=draw.state;
         const left=s[6]?Math.max(0,s[7]):0,top=s[6]?Math.max(0,s[8]):0;
         const right=s[6]?Math.min(this.canvas.width,s[9]):this.canvas.width,bottom=s[6]?Math.min(this.canvas.height,s[10]):this.canvas.height;
         if(right<=left||bottom<=top)return true;
         pass.setScissorRect(left,top,right-left,bottom-top);pass.setStencilReference(s[3]&255);
-        if(draw.indexCount){pass.setIndexBuffer(this.buffer(draw.indices,GPUBufferUsage.INDEX),draw.index32?'uint32':'uint16');pass.drawIndexed(draw.indexCount);}
+        if(draw.indexCount){const index=this.buffer(draw.indices,GPUBufferUsage.INDEX);pass.setIndexBuffer(index.buffer,draw.index32?'uint32':'uint16',index.offset,index.size);pass.drawIndexed(draw.indexCount);}
         else pass.draw(draw.count);
         ++this.draws;return true;
     }
-    shutdown(){this.present();for(const r of this.textures.values())r.texture.destroy();this.textures.clear();this.depth?.destroy();this.multisample?.destroy();}
+    shutdown(){this.present();for(const block of this.uploadBlocks)block.gpu.destroy();this.uploadBlocks=[];for(const r of this.textures.values())r.texture.destroy();this.textures.clear();this.depth?.destroy();this.multisample?.destroy();}
 }

@@ -442,30 +442,37 @@ class Context final : public CKRasterizerContext {
         CKVertexLayoutDesc vertexLayout;
         if (!CKFFVertexLayout::BuildLayout(draw.VertexFormat, elements, 20, vertexLayout))
             return FALSE;
+        // Resolve the shader/vertex-layout mapping once per draw, rather than
+        // searching all layout elements for every input of every vertex.
+        CKDWORD defaults[64] = {};
+        struct Copy { const CKVertexElementDesc *element; unsigned offset; };
+        std::vector<Copy> copies;
+        for (const auto &input : iface.VertexInputs) {
+            memcpy(defaults + input.Location * 4, input.DefaultValue, 16);
+            for (unsigned e = 0; e < vertexLayout.ElementCount; ++e) {
+                const auto &element = elements[e];
+                if (element.Attrib != input.Attribute) continue;
+                if (element.Type != CKRST_ATTRIBTYPE_FLOAT && element.Type != CKRST_ATTRIBTYPE_UINT8)
+                    return FALSE;
+                copies.push_back({&element, unsigned(input.Location * 4) | (input.Integer ? 0x10000u : 0)});
+            }
+        }
         std::vector<CKDWORD> vertices(size_t(draw.VertexCount) * 64);
-        for (unsigned v = 0; v < draw.VertexCount; ++v)
-            for (const auto &input : iface.VertexInputs) {
-                CKDWORD *dest = vertices.data() + size_t(v) * 64 + input.Location * 4;
-                memcpy(dest, input.DefaultValue, 16);
-                for (unsigned e = 0; e < vertexLayout.ElementCount; ++e) {
-                    const auto &elem = elements[e];
-                    if (elem.Attrib != input.Attribute)
-                        continue;
-                    const CKBYTE *src = draw.Vertices + size_t(v) * draw.VertexStride + elem.Offset;
-                    if (elem.Type == CKRST_ATTRIBTYPE_FLOAT)
-                        memcpy(dest, src, elem.Count * 4);
-                    else if (elem.Type == CKRST_ATTRIBTYPE_UINT8)
-                        for (unsigned j = 0; j < elem.Count; ++j) {
-                            if (input.Integer)
-                                dest[j] = src[j];
-                            else
-                                reinterpret_cast<float *>(dest)[j] =
-                                    elem.Normalized ? src[j] / 255.f : float(src[j]);
-                        }
-                    else
-                        return FALSE;
+        for (unsigned v = 0; v < draw.VertexCount; ++v) {
+            CKDWORD *target = vertices.data() + size_t(v) * 64;
+            memcpy(target, defaults, sizeof(defaults));
+            for (const auto &copy : copies) {
+                const auto &element = *copy.element;
+                CKDWORD *dest = target + (copy.offset & 0xffffu);
+                const CKBYTE *src = draw.Vertices + size_t(v) * draw.VertexStride + element.Offset;
+                if (element.Type == CKRST_ATTRIBTYPE_FLOAT)
+                    memcpy(dest, src, element.Count * 4);
+                else for (unsigned j = 0; j < element.Count; ++j) {
+                    if (copy.offset & 0x10000u) dest[j] = src[j];
+                    else reinterpret_cast<float *>(dest)[j] = element.Normalized ? src[j] / 255.f : float(src[j]);
                 }
             }
+        }
         const auto &p = draw.Pipeline;
         CKDWORD state[13] = {p.State.Lo,
                              p.State.Mid,
