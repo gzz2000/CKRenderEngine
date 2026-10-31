@@ -3201,6 +3201,19 @@ extern "C" void CKSetResponsiveViewport(CKRenderContext *context, CKBOOL enabled
     rc->m_RenderedScene->UpdateViewportSize(TRUE, CK_RENDER_USECURRENTSETTINGS);
 }
 
+extern "C" CKBOOL CKGetResponsiveUIRect(CKRenderContext *context, VxRect *rect) {
+    if (!context || !rect) return FALSE;
+    auto *rc = static_cast<RCKRenderContext *>(context);
+    if (!rc->m_ResponsiveViewport || rc->m_TargetTexture) return FALSE;
+    const float width = float(rc->m_Settings.m_Rect.right);
+    const float height = float(rc->m_Settings.m_Rect.bottom);
+    const float scale = width / 4.0f < height / 3.0f ? width / 4.0f : height / 3.0f;
+    const float x = (width - scale * 4.0f) * 0.5f;
+    const float y = (height - scale * 3.0f) * 0.5f;
+    *rect = VxRect(x, y, x + scale * 4.0f, y + scale * 3.0f);
+    return TRUE;
+}
+
 void RCKRenderContext::UpdateProjection(CKBOOL forceUpdate) {
     if (!forceUpdate && m_ProjectionUpdated)
         return;
@@ -3243,6 +3256,7 @@ void RCKRenderContext::UpdateProjection(CKBOOL forceUpdate) {
     const float bottom = (float) m_Settings.m_Rect.bottom;
     VxRect rect(0.0f, 0.0f, right, bottom);
 
+    CKGetResponsiveUIRect(this, &rect);
     Update2dRootRect(Get2dRoot(TRUE), rect);
     Update2dRootRect(Get2dRoot(FALSE), rect);
 }
