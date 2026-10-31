@@ -7,20 +7,14 @@ export async function createBallanceGl(canvas,sources) {
 }
 class BallanceGl {
     constructor(gl,canvas,sources){
-        Object.assign(this,{gl,canvas,backend:'webgl2',errors:[],frames:0,draws:0,samples:1});
+        Object.assign(this,{gl,canvas,sources,backend:'webgl2',errors:[],frames:0,draws:0,samples:1});
         this.textures=new Map();this.samplers=new Map();this.programs=new Map();this.ubos=new Map();this.shaders={};
         this.vbo=gl.createBuffer();this.ibo=gl.createBuffer();this.vao=gl.createVertexArray();gl.bindVertexArray(this.vao);
         this.onLost=e=>{e.preventDefault();this.errors.push('WebGL context lost; reload to restore the game');};
         canvas.addEventListener('webglcontextlost',this.onLost);
         try{
-            for(const [name,source] of Object.entries(sources)){
-                const shader=gl.createShader(name.startsWith('vs_')?gl.VERTEX_SHADER:gl.FRAGMENT_SHADER);
-                gl.shaderSource(shader,source);gl.compileShader(shader);
-                if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)){const error=gl.getShaderInfoLog(shader);gl.deleteShader(shader);throw new Error(name+': '+error);}
-                this.shaders[name]=shader;
-            }
-            // Link all six FFP layouts now, so unsupported drivers fail before play.
-            for(let pt=0;pt<2;pt++)for(let layout=0;layout<3;layout++)this.program(pt,layout);
+            // Old mobile drivers can reject the large software-sampling shaders
+            // even when the game never needs that path. Compile on first use.
             this.defaultTextures=[];
             for(let kind=0;kind<3;kind++){
                 const id=-kind-1;this.texture(id,1,1,1,1,kind);
@@ -39,12 +33,21 @@ class BallanceGl {
         }catch(error){this.shutdown();throw error;}
     }
     checkError(label){const code=this.gl.getError();if(code!==this.gl.NO_ERROR){const message=`WebGL2 ${label}: 0x${code.toString(16)}`;if(this.errors.at(-1)!==message)this.errors.push(message);return false;}return true;}
-    program(positionT,layout){
-        const key=Number(!!positionT)+':'+layout;if(this.programs.has(key))return this.programs.get(key);
-        const gl=this.gl,p=gl.createProgram();
-        gl.attachShader(p,this.shaders[positionT?'vs_ff_positiont':'vs_ff_3d']);
-        gl.attachShader(p,this.shaders[['fs_ff_stage','fs_ff_stage_cube','fs_ff_stage_volume'][layout]]);gl.linkProgram(p);
-        if(!gl.getProgramParameter(p,gl.LINK_STATUS)){const error=gl.getProgramInfoLog(p);gl.deleteProgram(p);throw new Error('WebGL2 FFP link: '+error);}
+    shader(name){
+        if(this.shaders[name])return this.shaders[name];
+        const gl=this.gl,source=this.sources[name];if(!source)throw new Error('Missing WebGL2 shader '+name);
+        const shader=gl.createShader(name.startsWith('vs_')?gl.VERTEX_SHADER:gl.FRAGMENT_SHADER);
+        gl.shaderSource(shader,source);gl.compileShader(shader);
+        if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)){const error=gl.getShaderInfoLog(shader);gl.deleteShader(shader);throw new Error(name+': '+error);}
+        return this.shaders[name]=shader;
+    }
+    program(positionT,layout,hardware=true){
+        const key=Number(!!positionT)+':'+layout+':'+Number(hardware);if(this.programs.has(key))return this.programs.get(key);
+        const gl=this.gl,vertex=positionT?'vs_ff_positiont':'vs_ff_3d';
+        const fragment=['fs_ff_stage','fs_ff_stage_cube','fs_ff_stage_volume'][layout]+(hardware?'_native':'');
+        const vs=this.shader(vertex),fs=this.shader(fragment),p=gl.createProgram();
+        gl.attachShader(p,vs);gl.attachShader(p,fs);gl.linkProgram(p);
+        if(!gl.getProgramParameter(p,gl.LINK_STATUS)){const error=gl.getProgramInfoLog(p);gl.deleteProgram(p);throw new Error(`WebGL2 FFP link (${vertex}/${fragment}): ${error}`);}
         gl.useProgram(p);
         for(const [group,prefix,count] of [[1,'CKVertex',3],[3,'CKFragment',2]])for(let binding=0;binding<count;binding++){
             const index=gl.getUniformBlockIndex(p,'type_'+prefix+binding);
@@ -148,8 +151,7 @@ class BallanceGl {
             }
         }
         if(indexCount){gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,this.ibo);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,indices,gl.STREAM_DRAW);}
-        const program=this.program(positionT,layout);gl.useProgram(program.p);
-        this.pending={state:[...state],positionT,layout,count,indexCount,index32,program,mips:new Int32Array(16).fill(1)};
+        this.pending={state:[...state],positionT,layout,count,indexCount,index32,hardware:true,mips:new Int32Array(16).fill(1)};
     }
     uniform(group,binding,bytes){
         const gl=this.gl,slot=(group===1?0:3)+binding;let buffer=this.ubos.get(slot);
@@ -157,6 +159,12 @@ class BallanceGl {
         gl.bindBuffer(gl.UNIFORM_BUFFER,buffer);gl.bufferData(gl.UNIFORM_BUFFER,bytes,gl.STREAM_DRAW);gl.bindBufferBase(gl.UNIFORM_BUFFER,slot,buffer);
     }
     binding(slot,id,s,dimension){
+        // Hardware variants preserve the ordinary 2D/3D paths. Border texels
+        // need the full per-tap implementation; cube sampling is unchanged in
+        // both variants. Keep volume/compare/manual-anisotropy on the complete
+        // path as well; they can require explicit gradients or manual LOD.
+        if((dimension!==1&&(s[3]===4||s[4]===4||(dimension===2&&s[5]===4)))||
+            (this.textures.has(id)&&(dimension===2||s[7]!==0||s[10]!==0)))this.pending.hardware=false;
         const gl=this.gl,r=this.textures.get(id)??this.defaultTextures[dimension],key=JSON.stringify(s.slice(0,10));let sampler=this.samplers.get(key);
         if(!sampler){
             sampler=gl.createSampler();const nearest=s[0]===1;
@@ -194,7 +202,8 @@ class BallanceGl {
             for(const [face,bits] of [[gl.FRONT,mid>>>10],[gl.BACK,(hi&65535)?hi:mid>>>10]]){gl.stencilFuncSeparate(face,compare[bits&15],ref&255,read&255);gl.stencilOpSeparate(face,ops[(bits>>>4)&15],ops[(bits>>>8)&15],ops[(bits>>>12)&15]);}
             gl.stencilMask(write&255);
         }
-        gl.uniform1iv(d.program.mips,d.mips);
+        const program=this.program(d.positionT,d.layout,d.hardware);gl.useProgram(program.p);
+        gl.uniform1iv(program.mips,d.mips);
         const mode=[gl.TRIANGLES,gl.POINTS,gl.LINES,gl.LINE_STRIP,gl.TRIANGLES,gl.TRIANGLE_STRIP,gl.TRIANGLES][(mid>>>6)&7];
         if(d.indexCount)gl.drawElements(mode,d.indexCount,d.index32?gl.UNSIGNED_INT:gl.UNSIGNED_SHORT,0);else gl.drawArrays(mode,0,d.count);
         this.dirty=true;++this.draws;return true;

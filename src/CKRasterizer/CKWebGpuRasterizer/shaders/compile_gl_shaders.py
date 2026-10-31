@@ -27,7 +27,8 @@ def main():
     packed = bytes(int(v, 16) for v in re.findall(r'0x([0-9a-fA-F]{2})', (NATIVE / 'generated/spirv_pack.h').read_text()))
     artifacts = decode(packed)
     assert len(entries) == len(artifacts)
-    names = {'vs_ff_3d', 'vs_ff_positiont', 'fs_ff_stage', 'fs_ff_stage_cube', 'fs_ff_stage_volume'}
+    names = {'vs_ff_3d', 'vs_ff_positiont', 'fs_ff_stage', 'fs_ff_stage_cube', 'fs_ff_stage_volume',
+             'fs_ff_stage_native', 'fs_ff_stage_cube_native', 'fs_ff_stage_volume_native'}
     grammar = json.loads(a.spirv_grammar.read_text())
     shaders = {}
     with tempfile.TemporaryDirectory(prefix='ballance-glsl-') as tmp:
