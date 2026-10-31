@@ -33,13 +33,13 @@ EM_JS(int, web_upload, (unsigned id, int mip, int face, int w, int h, int x, int
 EM_JS(void, web_delete, (unsigned id), { Module['ballanceGpu'].deleteTexture(id); });
 EM_JS(void, web_draw_begin,
       (const unsigned *state, int pt, int layout, const void *vertices, int count, const void *indices,
-       int indexCount, int index32),
+       int indexCount, int index32, unsigned mask, int stride, const void *defaults),
       {
           Module['ballanceGpu'].beginDraw(
               Array.from(HEAPU32.subarray(state >>> 2, (state >>> 2) + 13)), pt, layout,
-              HEAPU8.slice(vertices, vertices + count * 256), count,
-              indexCount ? HEAPU8.slice(indices, indices + indexCount * (index32 ? 4 : 2)) : null, indexCount,
-              index32);
+              HEAPU8.subarray(vertices, vertices + count * stride), count,
+              indexCount ? HEAPU8.subarray(indices, indices + indexCount * (index32 ? 4 : 2)) : null, indexCount,
+              index32, mask, stride, HEAPU8.subarray(defaults, defaults + 256));
       });
 EM_JS(void, web_uniform, (int group, int binding, const void *data, int size),
       { Module['ballanceGpu'].uniform(group, binding, HEAPU8.subarray(data, data + size)); });
@@ -442,33 +442,46 @@ class Context final : public CKRasterizerContext {
         CKVertexLayoutDesc vertexLayout;
         if (!CKFFVertexLayout::BuildLayout(draw.VertexFormat, elements, 20, vertexLayout))
             return FALSE;
-        // Resolve the shader/vertex-layout mapping once per draw, rather than
-        // searching all layout elements for every input of every vertex.
-        CKDWORD defaults[64] = {};
-        struct Copy { const CKVertexElementDesc *element; unsigned offset; };
-        std::vector<Copy> copies;
-        for (const auto &input : iface.VertexInputs) {
+        // Only varying attributes belong in the per-vertex stream. Missing
+        // inputs come from one instance-rate record, preserving the shader's
+        // exact legacy defaults without uploading them for every vertex.
+        CKDWORD defaults[64] = {}, compactDefaults[64] = {};
+        struct Copy { const CKVertexElementDesc *element; unsigned offset; bool integer; };
+        Copy copies[16];
+        unsigned copyCount = 0, mask = 0;
+        for (const auto &input : iface.VertexInputs)
             memcpy(defaults + input.Location * 4, input.DefaultValue, 16);
-            for (unsigned e = 0; e < vertexLayout.ElementCount; ++e) {
-                const auto &element = elements[e];
-                if (element.Attrib != input.Attribute) continue;
-                if (element.Type != CKRST_ATTRIBTYPE_FLOAT && element.Type != CKRST_ATTRIBTYPE_UINT8)
-                    return FALSE;
-                copies.push_back({&element, unsigned(input.Location * 4) | (input.Integer ? 0x10000u : 0)});
+        for (unsigned location = 0; location < 16; ++location) {
+            for (const auto &input : iface.VertexInputs) {
+                if (input.Location != location) continue;
+                for (unsigned e = 0; e < vertexLayout.ElementCount; ++e) {
+                    const auto &element = elements[e];
+                    if (element.Attrib != input.Attribute) continue;
+                    if (element.Type != CKRST_ATTRIBTYPE_FLOAT && element.Type != CKRST_ATTRIBTYPE_UINT8)
+                        return FALSE;
+                    memcpy(compactDefaults + copyCount * 4, input.DefaultValue, 16);
+                    copies[copyCount] = {&element, copyCount * 4, bool(input.Integer)};
+                    ++copyCount;
+                    mask |= 1u << location;
+                    break;
+                }
             }
         }
-        std::vector<CKDWORD> vertices(size_t(draw.VertexCount) * 64);
+        if (!copyCount) return FALSE;
+        const unsigned words = copyCount * 4;
+        std::vector<CKDWORD> vertices(size_t(draw.VertexCount) * words);
         for (unsigned v = 0; v < draw.VertexCount; ++v) {
-            CKDWORD *target = vertices.data() + size_t(v) * 64;
-            memcpy(target, defaults, sizeof(defaults));
-            for (const auto &copy : copies) {
+            CKDWORD *target = vertices.data() + size_t(v) * words;
+            memcpy(target, compactDefaults, words * sizeof(CKDWORD));
+            for (unsigned c = 0; c < copyCount; ++c) {
+                const auto &copy = copies[c];
                 const auto &element = *copy.element;
-                CKDWORD *dest = target + (copy.offset & 0xffffu);
+                CKDWORD *dest = target + copy.offset;
                 const CKBYTE *src = draw.Vertices + size_t(v) * draw.VertexStride + element.Offset;
                 if (element.Type == CKRST_ATTRIBTYPE_FLOAT)
                     memcpy(dest, src, element.Count * 4);
                 else for (unsigned j = 0; j < element.Count; ++j) {
-                    if (copy.offset & 0x10000u) dest[j] = src[j];
+                    if (copy.integer) dest[j] = src[j];
                     else reinterpret_cast<float *>(dest)[j] = element.Normalized ? src[j] / 255.f : float(src[j]);
                 }
             }
@@ -488,7 +501,7 @@ class Context final : public CKRasterizerContext {
                              CKDWORD(m_Width),
                              CKDWORD(m_Height)};
         web_draw_begin(state, pt, layout, vertices.data(), draw.VertexCount, draw.Indices, draw.IndexCount,
-                       draw.Index32);
+                       draw.Index32, mask, words * sizeof(CKDWORD), defaults);
         for (const auto &decl : iface.Samplers) {
             const auto &binding = draw.Textures->NativeBindings[decl.Slot];
             const auto &sampler = binding.Sampler;

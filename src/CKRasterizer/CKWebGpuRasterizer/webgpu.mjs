@@ -193,8 +193,14 @@ class BallanceGpu {
         block.bytes.set(bytes,offset);block.used=offset+size;
         return {buffer:block.gpu,offset,size:bytes.byteLength};
     }
-    beginDraw(state,positionT,layout,vertices,count,indices,indexCount,index32){
-        this.pending={state,positionT,layout,vertices,count,indices,indexCount,index32,uniforms:[],textures:[]};
+    beginDraw(state,positionT,layout,vertices,count,indices,indexCount,index32,attributeMask=65535,vertexStride=256,defaults=null){
+        // Copy into the upload arena immediately: Wasm views are borrowed only
+        // for this call and may be invalidated by subsequent memory growth.
+        const vertexBuffer=this.buffer(vertices,GPUBufferUsage.VERTEX);
+        const indexBuffer=indexCount?this.buffer(indices,GPUBufferUsage.INDEX):null;
+        const defaultBuffer=defaults&&attributeMask!==65535?this.buffer(defaults,GPUBufferUsage.VERTEX):null;
+        this.pending={state,positionT,layout,count,indexCount,index32,attributeMask,vertexStride,
+            vertexBuffer,indexBuffer,defaultBuffer,uniforms:[],textures:[]};
     }
     uniform(group,binding,bytes){this.pending.uniforms.push({group,binding,resource:this.buffer(bytes,GPUBufferUsage.UNIFORM)});}
     binding(slot,id,s,dimension){
@@ -210,11 +216,18 @@ class BallanceGpu {
     }
     pipeline(draw){
         const [lo,mid,hi,,readMask,writeMask]=draw.state;
-        const key=JSON.stringify([draw.positionT,draw.layout,lo,mid,hi,readMask,writeMask,!!draw.indexCount,!!draw.index32,this.samples]);
+        const key=JSON.stringify([draw.positionT,draw.layout,draw.attributeMask,draw.vertexStride,lo,mid,hi,readMask,writeMask,!!draw.indexCount,!!draw.index32,this.samples]);
         let pipeline=this.pipelines.get(key);if(pipeline)return pipeline;
         const vertex=this.modules[draw.positionT?'vs_ff_positiont':'vs_ff_3d'];
         const fragment=this.modules[['fs_ff_stage','fs_ff_stage_cube','fs_ff_stage_volume'][draw.layout]];
-        const attributes=Array.from({length:16},(_,i)=>({shaderLocation:i,offset:i*16,format:i===6?'uint32x4':([1,2,3,7].includes(i)?'float32x3':'float32x4')}));
+        const attributes=[],defaults=[];
+        for(let i=0;i<16;++i){
+            const varying=!!(draw.attributeMask&(1<<i));
+            (varying?attributes:defaults).push({shaderLocation:i,offset:varying?attributes.length*16:i*16,
+                format:i===6?'uint32x4':([1,2,3,7].includes(i)?'float32x3':'float32x4')});
+        }
+        const buffers=[{arrayStride:draw.vertexStride,attributes}];
+        if(defaults.length)buffers.push({arrayStride:256,stepMode:'instance',attributes:defaults});
         const cull=(lo>>>10)&3,src=(lo>>>16)&15,dst=(lo>>>20)&15,srcA=(lo>>>24)&15,dstA=lo>>>28;
         const factor=(n,alpha)=>alpha&&n===3?'src-alpha':alpha&&n===4?'one-minus-src-alpha':alpha&&n===9?'dst-alpha':alpha&&n===10?'one-minus-dst-alpha':alpha&&n===11?'one':blend[n];
         const colorBlend=src?{color:{srcFactor:factor(src,false),dstFactor:factor(dst,false),operation:op[mid&7]},
@@ -225,7 +238,7 @@ class BallanceGpu {
         const ds={format:'depth24plus-stencil8',depthWriteEnabled:!!(lo&32),depthCompare:lo&16?compare[(lo>>>6)&15]:'always'};
         if(mid&0x200){ds.stencilFront=stencilFace(mid>>>10);ds.stencilBack=(hi&65535)?stencilFace(hi):ds.stencilFront;ds.stencilReadMask=readMask&255;ds.stencilWriteMask=writeMask&255;}
         pipeline=this.device.createRenderPipeline({label:'Ballance fixed function',layout:'auto',
-            vertex:{module:vertex,entryPoint:'main',buffers:[{arrayStride:256,attributes}]},
+            vertex:{module:vertex,entryPoint:'main',buffers},
             fragment:{module:fragment,entryPoint:'main',targets:[{format:this.format,blend:colorBlend,writeMask:lo&15}]},primitive,depthStencil:ds,multisample:{count:this.samples}});
         this.pipelines.set(key,pipeline);return pipeline;
     }
@@ -236,13 +249,14 @@ class BallanceGpu {
         for(const group of [1,3])pass.setBindGroup(group,this.device.createBindGroup({layout:pipeline.getBindGroupLayout(group),entries:
             draw.uniforms.filter(u=>u.group===group).map(u=>({binding:u.binding,resource:u.resource}))}));
         pass.setBindGroup(2,this.device.createBindGroup({layout:pipeline.getBindGroupLayout(2),entries:draw.textures}));
-        const vertex=this.buffer(draw.vertices,GPUBufferUsage.VERTEX);pass.setVertexBuffer(0,vertex.buffer,vertex.offset,vertex.size);
+        const vertex=draw.vertexBuffer;pass.setVertexBuffer(0,vertex.buffer,vertex.offset,vertex.size);
+        if(draw.defaultBuffer){const d=draw.defaultBuffer;pass.setVertexBuffer(1,d.buffer,d.offset,d.size);}
         const s=draw.state;
         const left=s[6]?Math.max(0,s[7]):0,top=s[6]?Math.max(0,s[8]):0;
         const right=s[6]?Math.min(this.canvas.width,s[9]):this.canvas.width,bottom=s[6]?Math.min(this.canvas.height,s[10]):this.canvas.height;
         if(right<=left||bottom<=top)return true;
         pass.setScissorRect(left,top,right-left,bottom-top);pass.setStencilReference(s[3]&255);
-        if(draw.indexCount){const index=this.buffer(draw.indices,GPUBufferUsage.INDEX);pass.setIndexBuffer(index.buffer,draw.index32?'uint32':'uint16',index.offset,index.size);pass.drawIndexed(draw.indexCount);}
+        if(draw.indexCount){const index=draw.indexBuffer;pass.setIndexBuffer(index.buffer,draw.index32?'uint32':'uint16',index.offset,index.size);pass.drawIndexed(draw.indexCount);}
         else pass.draw(draw.count);
         ++this.draws;return true;
     }
