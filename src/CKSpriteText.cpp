@@ -226,7 +226,13 @@ CKStateChunk *RCKSpriteText::Save(CKFile *file, CKDWORD flags) {
 
     // Write font info
     VXFONTINFO fontInfo;
+#ifdef __EMSCRIPTEN__
+    // The browser reports pixel height; serialize requested point/pixel size to
+    // avoid a 96/72 scaling accumulation across save/restore cycles.
+    {
+#else
     if (!VxGetFontInfo(m_Font, fontInfo)) {
+#endif
         // A new sprite or an unavailable platform font has no queryable handle.
         // Preserve its requested state rather than serializing undefined fields.
         fontInfo.FaceName = m_FontName ? m_FontName : "";
