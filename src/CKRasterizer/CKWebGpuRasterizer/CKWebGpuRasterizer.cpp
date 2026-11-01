@@ -532,7 +532,11 @@ class Driver final : public CKRasterizerDriver {
   public:
     explicit Driver(CKRasterizer *owner) : CKRasterizerDriver(owner, 0, "WebGPU", TRUE) {
         for (auto size :
-             {std::pair{640, 480}, std::pair{800, 600}, std::pair{1280, 720}, std::pair{1920, 1080}}) {
+             // Slot zero is the browser's Auto mode, with a valid bootstrap size.
+             // Slot one is the explicit 640x480 mode, even though dimensions match.
+             {std::pair{640, 480}, std::pair{640, 480}, std::pair{800, 600},
+              std::pair{1024, 768}, std::pair{1280, 960}, std::pair{1600, 1200},
+              std::pair{1920, 1440}, std::pair{2560, 1920}}) {
             VxDisplayMode mode;
             mode.Width = size.first;
             mode.Height = size.second;
